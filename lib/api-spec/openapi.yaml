@@ -1,0 +1,944 @@
+openapi: 3.1.0
+info:
+  # Do not change the title, if the title changes, the import paths will be broken
+  title: Api
+  version: 0.2.0
+  description: FreelanceTM API specification
+servers:
+  - url: /api
+    description: Base API path
+tags:
+  - name: health
+    description: Health operations
+  - name: users
+    description: User profiles
+  - name: categories
+    description: Service categories
+  - name: gigs
+    description: Freelancer gigs/services
+  - name: orders
+    description: Orders
+  - name: reviews
+    description: Reviews and ratings
+  - name: messages
+    description: Chat messages
+  - name: favorites
+    description: Saved/favorited gigs
+
+paths:
+  /healthz:
+    get:
+      operationId: healthCheck
+      tags: [health]
+      summary: Health check
+      responses:
+        "200":
+          description: Healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthStatus"
+
+  /users/me:
+    get:
+      operationId: getMe
+      tags: [users]
+      summary: Get current user
+      responses:
+        "200":
+          description: Current user
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "401":
+          description: Unauthorized
+    patch:
+      operationId: updateMe
+      tags: [users]
+      summary: Update current user profile
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UserUpdate"
+      responses:
+        "200":
+          description: Updated user
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+
+  /users/me/onboarding:
+    post:
+      operationId: completeOnboarding
+      tags: [users]
+      summary: Complete seller/buyer onboarding
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OnboardingInput"
+      responses:
+        "200":
+          description: Updated user after onboarding
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+
+  /users/{userId}:
+    get:
+      operationId: getUser
+      tags: [users]
+      summary: Get a user profile
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: User profile
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "404":
+          description: Not found
+
+  /users/register:
+    post:
+      operationId: registerUser
+      tags: [users]
+      summary: Register or login a user
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UserRegisterInput"
+      responses:
+        "200":
+          description: Registered/logged in user
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+
+  /categories:
+    get:
+      operationId: listCategories
+      tags: [categories]
+      summary: List all service categories
+      responses:
+        "200":
+          description: List of categories
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Category"
+
+  /gigs:
+    get:
+      operationId: listGigs
+      tags: [gigs]
+      summary: List/search gigs
+      parameters:
+        - name: categoryId
+          in: query
+          schema:
+            type: integer
+        - name: search
+          in: query
+          schema:
+            type: string
+        - name: minPrice
+          in: query
+          schema:
+            type: number
+        - name: maxPrice
+          in: query
+          schema:
+            type: number
+        - name: sellerId
+          in: query
+          schema:
+            type: integer
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [draft, active, paused]
+        - name: sortBy
+          in: query
+          schema:
+            type: string
+            enum: [newest, rating, price_asc, price_desc, orders]
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+      responses:
+        "200":
+          description: List of gigs
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GigListResponse"
+    post:
+      operationId: createGig
+      tags: [gigs]
+      summary: Create a new gig
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GigInput"
+      responses:
+        "201":
+          description: Created gig
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Gig"
+
+  /gigs/featured:
+    get:
+      operationId: listFeaturedGigs
+      tags: [gigs]
+      summary: Get featured gigs for homepage
+      responses:
+        "200":
+          description: Featured gigs
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Gig"
+
+  /gigs/stats:
+    get:
+      operationId: getPlatformStats
+      tags: [gigs]
+      summary: Get platform statistics
+      responses:
+        "200":
+          description: Platform stats
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlatformStats"
+
+  /gigs/{gigId}:
+    get:
+      operationId: getGig
+      tags: [gigs]
+      summary: Get a gig by ID
+      parameters:
+        - name: gigId
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Gig details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Gig"
+        "404":
+          description: Not found
+    patch:
+      operationId: updateGig
+      tags: [gigs]
+      summary: Update a gig
+      parameters:
+        - name: gigId
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GigUpdate"
+      responses:
+        "200":
+          description: Updated gig
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Gig"
+    delete:
+      operationId: deleteGig
+      tags: [gigs]
+      summary: Delete a gig
+      parameters:
+        - name: gigId
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "204":
+          description: Deleted
+
+  /orders:
+    get:
+      operationId: listOrders
+      tags: [orders]
+      summary: List user's orders
+      parameters:
+        - name: role
+          in: query
+          schema:
+            type: string
+            enum: [buyer, seller]
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [pending, active, delivered, completed, cancelled, disputed]
+      responses:
+        "200":
+          description: List of orders
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Order"
+    post:
+      operationId: createOrder
+      tags: [orders]
+      summary: Create an order
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OrderInput"
+      responses:
+        "201":
+          description: Created order
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Order"
+
+  /orders/{orderId}:
+    get:
+      operationId: getOrder
+      tags: [orders]
+      summary: Get an order by ID
+      parameters:
+        - name: orderId
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Order details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Order"
+
+  /orders/{orderId}/status:
+    patch:
+      operationId: updateOrderStatus
+      tags: [orders]
+      summary: Update order status
+      parameters:
+        - name: orderId
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OrderStatusUpdate"
+      responses:
+        "200":
+          description: Updated order
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Order"
+
+  /reviews:
+    post:
+      operationId: createReview
+      tags: [reviews]
+      summary: Create a review
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReviewInput"
+      responses:
+        "201":
+          description: Created review
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Review"
+
+  /reviews/gig/{gigId}:
+    get:
+      operationId: listGigReviews
+      tags: [reviews]
+      summary: Get reviews for a gig
+      parameters:
+        - name: gigId
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: List of reviews
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Review"
+
+  /messages/{orderId}:
+    get:
+      operationId: listMessages
+      tags: [messages]
+      summary: Get messages for an order
+      parameters:
+        - name: orderId
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Messages
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Message"
+    post:
+      operationId: sendMessage
+      tags: [messages]
+      summary: Send a message in an order
+      parameters:
+        - name: orderId
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MessageInput"
+      responses:
+        "201":
+          description: Sent message
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Message"
+
+  /favorites:
+    get:
+      operationId: listFavorites
+      tags: [favorites]
+      summary: Get current user's favorited gigs
+      responses:
+        "200":
+          description: List of favorited gig IDs
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: integer
+    post:
+      operationId: addFavorite
+      tags: [favorites]
+      summary: Add a gig to favorites
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FavoriteInput"
+      responses:
+        "200":
+          description: Updated favorites list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: integer
+
+  /favorites/{gigId}:
+    delete:
+      operationId: removeFavorite
+      tags: [favorites]
+      summary: Remove a gig from favorites
+      parameters:
+        - name: gigId
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Updated favorites list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: integer
+
+components:
+  schemas:
+    HealthStatus:
+      type: object
+      properties:
+        status:
+          type: string
+      required:
+        - status
+
+    User:
+      type: object
+      required: [id, username, email, role, createdAt, isVerified, level, onboardingCompleted]
+      properties:
+        id:
+          type: integer
+        username:
+          type: string
+        email:
+          type: string
+        displayName:
+          type: ["string", "null"]
+        bio:
+          type: ["string", "null"]
+        avatarUrl:
+          type: ["string", "null"]
+        role:
+          type: string
+          enum: [freelancer, client, both]
+        skills:
+          type: array
+          items:
+            type: string
+        telegramUsername:
+          type: ["string", "null"]
+        telegramChatId:
+          type: ["string", "null"]
+        rating:
+          type: ["number", "null"]
+        completedOrders:
+          type: integer
+        responseTime:
+          type: ["integer", "null"]
+        lastActiveAt:
+          type: string
+        isVerified:
+          type: boolean
+        level:
+          type: string
+          enum: [new, rising, top, pro]
+        portfolioUrls:
+          type: array
+          items:
+            type: string
+        country:
+          type: ["string", "null"]
+        languages:
+          type: array
+          items:
+            type: string
+        onboardingCompleted:
+          type: boolean
+        createdAt:
+          type: string
+
+    UserRegisterInput:
+      type: object
+      required: [username, email]
+      properties:
+        username:
+          type: string
+        email:
+          type: string
+        displayName:
+          type: string
+        role:
+          type: string
+          enum: [freelancer, client, both]
+
+    UserUpdate:
+      type: object
+      properties:
+        displayName:
+          type: string
+        bio:
+          type: string
+        avatarUrl:
+          type: string
+        skills:
+          type: array
+          items:
+            type: string
+        telegramUsername:
+          type: string
+        role:
+          type: string
+          enum: [freelancer, client, both]
+        portfolioUrls:
+          type: array
+          items:
+            type: string
+        languages:
+          type: array
+          items:
+            type: string
+        country:
+          type: string
+
+    OnboardingInput:
+      type: object
+      required: [role]
+      properties:
+        role:
+          type: string
+          enum: [freelancer, client, both]
+        displayName:
+          type: string
+        bio:
+          type: string
+        skills:
+          type: array
+          items:
+            type: string
+        telegramUsername:
+          type: string
+        portfolioUrls:
+          type: array
+          items:
+            type: string
+        languages:
+          type: array
+          items:
+            type: string
+
+    Category:
+      type: object
+      required: [id, name, slug, icon, gigCount]
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        slug:
+          type: string
+        icon:
+          type: string
+        description:
+          type: ["string", "null"]
+        gigCount:
+          type: integer
+
+    Gig:
+      type: object
+      required: [id, title, description, price, deliveryDays, categoryId, sellerId, createdAt, status, revisions]
+      properties:
+        id:
+          type: integer
+        title:
+          type: string
+        description:
+          type: string
+        price:
+          type: number
+        deliveryDays:
+          type: integer
+        revisions:
+          type: integer
+        categoryId:
+          type: integer
+        categoryName:
+          type: ["string", "null"]
+        sellerId:
+          type: integer
+        sellerUsername:
+          type: ["string", "null"]
+        sellerDisplayName:
+          type: ["string", "null"]
+        sellerAvatarUrl:
+          type: ["string", "null"]
+        sellerRating:
+          type: ["number", "null"]
+        sellerLevel:
+          type: ["string", "null"]
+        sellerIsVerified:
+          type: ["boolean", "null"]
+        sellerCompletedOrders:
+          type: ["integer", "null"]
+        tags:
+          type: array
+          items:
+            type: string
+        imageUrl:
+          type: ["string", "null"]
+        rating:
+          type: ["number", "null"]
+        reviewCount:
+          type: integer
+        orderCount:
+          type: integer
+        isFeatured:
+          type: boolean
+        status:
+          type: string
+          enum: [draft, active, paused]
+        createdAt:
+          type: string
+
+    GigInput:
+      type: object
+      required: [title, description, price, deliveryDays, categoryId]
+      properties:
+        title:
+          type: string
+          minLength: 10
+        description:
+          type: string
+          minLength: 20
+        price:
+          type: number
+          minimum: 1
+        deliveryDays:
+          type: integer
+          minimum: 1
+        revisions:
+          type: integer
+          minimum: 0
+        categoryId:
+          type: integer
+        tags:
+          type: array
+          items:
+            type: string
+        imageUrl:
+          type: string
+        status:
+          type: string
+          enum: [draft, active, paused]
+
+    GigUpdate:
+      type: object
+      properties:
+        title:
+          type: string
+        description:
+          type: string
+        price:
+          type: number
+        deliveryDays:
+          type: integer
+        revisions:
+          type: integer
+        tags:
+          type: array
+          items:
+            type: string
+        imageUrl:
+          type: string
+        status:
+          type: string
+          enum: [draft, active, paused]
+
+    GigListResponse:
+      type: object
+      required: [gigs, total, page, limit]
+      properties:
+        gigs:
+          type: array
+          items:
+            $ref: "#/components/schemas/Gig"
+        total:
+          type: integer
+        page:
+          type: integer
+        limit:
+          type: integer
+
+    PlatformStats:
+      type: object
+      required: [totalFreelancers, totalGigs, totalOrders, totalCategories]
+      properties:
+        totalFreelancers:
+          type: integer
+        totalGigs:
+          type: integer
+        totalOrders:
+          type: integer
+        totalCategories:
+          type: integer
+        topCategories:
+          type: array
+          items:
+            $ref: "#/components/schemas/Category"
+
+    Order:
+      type: object
+      required: [id, gigId, buyerId, sellerId, status, totalPrice, createdAt]
+      properties:
+        id:
+          type: integer
+        gigId:
+          type: integer
+        gigTitle:
+          type: ["string", "null"]
+        buyerId:
+          type: integer
+        buyerUsername:
+          type: ["string", "null"]
+        sellerId:
+          type: integer
+        sellerUsername:
+          type: ["string", "null"]
+        status:
+          type: string
+          enum: [pending, active, delivered, completed, cancelled, disputed]
+        totalPrice:
+          type: number
+        requirements:
+          type: ["string", "null"]
+        deliveryDays:
+          type: integer
+        createdAt:
+          type: string
+        updatedAt:
+          type: string
+
+    OrderInput:
+      type: object
+      required: [gigId, requirements]
+      properties:
+        gigId:
+          type: integer
+        requirements:
+          type: string
+
+    OrderStatusUpdate:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [active, delivered, completed, cancelled, disputed]
+
+    Review:
+      type: object
+      required: [id, gigId, orderId, reviewerId, rating, createdAt]
+      properties:
+        id:
+          type: integer
+        gigId:
+          type: integer
+        orderId:
+          type: integer
+        reviewerId:
+          type: integer
+        reviewerUsername:
+          type: ["string", "null"]
+        reviewerAvatarUrl:
+          type: ["string", "null"]
+        rating:
+          type: integer
+          minimum: 1
+          maximum: 5
+        comment:
+          type: ["string", "null"]
+        createdAt:
+          type: string
+
+    ReviewInput:
+      type: object
+      required: [gigId, orderId, rating]
+      properties:
+        gigId:
+          type: integer
+        orderId:
+          type: integer
+        rating:
+          type: integer
+          minimum: 1
+          maximum: 5
+        comment:
+          type: string
+
+    Message:
+      type: object
+      required: [id, orderId, senderId, content, createdAt]
+      properties:
+        id:
+          type: integer
+        orderId:
+          type: integer
+        senderId:
+          type: integer
+        senderUsername:
+          type: ["string", "null"]
+        senderAvatarUrl:
+          type: ["string", "null"]
+        content:
+          type: string
+        createdAt:
+          type: string
+
+    MessageInput:
+      type: object
+      required: [content]
+      properties:
+        content:
+          type: string
+          minLength: 1
+
+    FavoriteInput:
+      type: object
+      required: [gigId]
+      properties:
+        gigId:
+          type: integer

@@ -1,0 +1,212 @@
+version: "3.8"
+
+# =============================================================================
+# FreelanceTM Production Stack
+# =============================================================================
+# Services:
+#   - api          NestJS backend
+#   - postgres     PostgreSQL 16
+#   - redis        Redis (sessions, cache, rate limit fallback)
+#   - minio        S3-compatible object storage (screenshots, portfolio)
+#   - nginx        Reverse proxy + SSL (Let's Encrypt ready)
+#   - loki         Log aggregation (optional, Grafana stack)
+#   - promtail     Log shipper
+#
+# Usage:
+#   export DOMAIN=your-domain.com
+#   docker-compose -f docker-compose.prod.yml up -d
+# =============================================================================
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: ftm-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme_in_prod}
+      POSTGRES_DB: ${POSTGRES_DB:-freelancetm}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - ftm-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: ftm-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    ports:
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - ftm-network
+
+  minio:
+    image: minio/minio:latest
+    container_name: ftm-minio
+    restart: unless-stopped
+    command: server --console-address ":9001" /data
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-changeme_in_prod}
+    volumes:
+      - minio_data:/data
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - ftm-network
+
+  # MinIO bucket initialization (one-shot)
+  minio-init:
+    image: minio/mc:latest
+    container_name: ftm-minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      sleep 5;
+      mc alias set local http://minio:9000 $$MINIO_ROOT_USER $$MINIO_ROOT_PASSWORD;
+      mc mb --ignore-existing local/freelancetm-uploads;
+      mc policy set public local/freelancetm-uploads;
+      mc mb --ignore-existing local/freelancetm-backups;
+      mc policy set none local/freelancetm-backups;
+      exit 0;
+      "
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-changeme_in_prod}
+    networks:
+      - ftm-network
+
+  api:
+    build:
+      context: ./api-server
+      dockerfile: Dockerfile
+    container_name: ftm-api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-changeme_in_prod}@postgres:5432/${POSTGRES_DB:-freelancetm}?schema=public&connection_limit=20
+      REDIS_URL: redis://redis:6379
+      S3_ENDPOINT: http://minio:9000
+      S3_BUCKET: freelancetm-uploads
+      S3_ACCESS_KEY: ${MINIO_ROOT_USER:-minioadmin}
+      S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-changeme_in_prod}
+      S3_REGION: us-east-1
+      S3_USE_SSL: "false"
+      JWT_SECRET: ${JWT_SECRET:-change-me-in-env-file-min-32-chars!!}
+      MASTER_ENCRYPTION_KEY: ${MASTER_ENCRYPTION_KEY:-change-me-in-env-file-32-bytes!!}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      TON_ENDPOINT: ${TON_ENDPOINT:-https://testnet.toncenter.com/api/v2/jsonRPC}
+      TON_API_KEY: ${TON_API_KEY}
+      PLATFORM_MNEMONIC: ${PLATFORM_MNEMONIC}
+      PLATFORM_WALLET_ADDRESS: ${PLATFORM_WALLET_ADDRESS}
+      ESCROW_CONTRACT_ADDRESS: ${ESCROW_CONTRACT_ADDRESS}
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+      ADMIN_SECRET: ${ADMIN_SECRET}
+      SENTRY_DSN: ${SENTRY_DSN}
+      MAX_FILE_SIZE_MB: "50"
+      # WebSocket + CORS
+      CLIENT_URL: ${CLIENT_URL:-https://app.freelancetm.io}
+    volumes:
+      - ./api-server/uploads:/app/uploads:rw
+    ports:
+      - "127.0.0.1:3000:3000"
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/api/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks:
+      - ftm-network
+
+  nginx:
+    image: nginx:alpine
+    container_name: ftm-nginx
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+      - certbot-data:/etc/letsencrypt:ro
+    networks:
+      - ftm-network
+
+  # Let's Encrypt (certbot) — uncomment when domain is ready
+  # certbot:
+  #   image: certbot/certbot:latest
+  #   container_name: ftm-certbot
+  #   volumes:
+  #     - certbot-data:/etc/letsencrypt
+  #     - ./nginx/www:/var/www/certbot:rw
+  #   entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew; sleep 12h; done'"
+  #   networks:
+  #     - ftm-network
+
+  # Log aggregation (optional — enable when scaling)
+  # loki:
+  #   image: grafana/loki:2.9.0
+  #   container_name: ftm-loki
+  #   restart: unless-stopped
+  #   ports:
+  #     - "127.0.0.1:3100:3100"
+  #   volumes:
+  #     - loki_data:/loki
+  #   networks:
+  #     - ftm-network
+
+  # promtail:
+  #   image: grafana/promtail:2.9.0
+  #   container_name: ftm-promtail
+  #   restart: unless-stopped
+  #   volumes:
+  #     - /var/lib/docker/containers:/var/lib/docker/containers:ro
+  #     - ./promtail/promtail.yml:/etc/promtail/config.yml:ro
+  #   networks:
+  #     - ftm-network
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
+  certbot-data:
+
+networks:
+  ftm-network:
+    driver: bridge

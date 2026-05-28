@@ -1,0 +1,9 @@
+{
+  "projects": [
+    {
+      "name": "FreelanceEscrow",
+      "path": "./src/FreelanceEscrow.tact",
+      "output": "./build/FreelanceEscrow"
+    }
+  ]
+}
