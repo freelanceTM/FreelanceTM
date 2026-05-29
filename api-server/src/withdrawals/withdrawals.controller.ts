@@ -1,6 +1,7 @@
 import { Controller, Post, Get, Body, Param, ParseIntPipe, UseGuards, Patch } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
 import { WithdrawalsService } from './withdrawals.service';
+import { WithdrawalRequestDto } from './dto/withdrawal-request.dto';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
@@ -17,9 +18,14 @@ export class WithdrawalsController {
   @ApiOperation({ summary: 'Request withdrawal (TON wallet / bank card)' })
   async request(
     @CurrentUser('sub') userId: number,
-    @Body() dto: { amountNano: string; destination: string; destinationType?: string },
+    @Body() dto: WithdrawalRequestDto,
   ) {
-    return this.withdrawalsService.requestWithdrawal(userId, BigInt(dto.amountNano), dto.destination, dto.destinationType);
+    return this.withdrawalsService.requestWithdrawal(
+      userId,
+      BigInt(dto.amountNano),
+      dto.destination,
+      dto.destinationType,
+    );
   }
 
   @Get('my')

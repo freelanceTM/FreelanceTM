@@ -601,6 +601,7 @@ model UserSession {
   id        String   @id @default(uuid())
   userId    Int
   tokenHash String
+  jti       String   @unique
   ip        String?
   userAgent String?
   expiresAt DateTime

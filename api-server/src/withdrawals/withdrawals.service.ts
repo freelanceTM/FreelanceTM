@@ -1,4 +1,5 @@
 import { Injectable, Logger, NotFoundException, ForbiddenException, BadRequestException } from '@nestjs/common';
+import { Address } from '@ton/core';
 import { PrismaService } from '../prisma/prisma.service';
 import { TonService } from '../ton/ton.service';
 
@@ -36,6 +37,35 @@ export class WithdrawalsService {
    *   everything rolls back.
    */
   async requestWithdrawal(userId: number, amountNano: bigint, destination: string, destinationType = 'ton_wallet') {
+    // ── 0. M-2 fix: validate destination address BEFORE any DB operation ─────
+    //
+    //  The original code stored `destination` as a raw string without any
+    //  format check. Address.parse() is called later (in ton.service.ts) during
+    //  admin approval — AFTER the balance has already been atomically decremented.
+    //  A malformed address would throw an unhandled exception, leaving the
+    //  withdrawal stuck in 'pending' with the user's balance permanently reduced.
+    //
+    //  Fix: parse the address here, at the very top, before touching the DB.
+    //  An invalid address throws a BadRequestException (400) immediately —
+    //  zero DB writes have occurred, the user's balance is untouched.
+    //
+    //  Bank card withdrawals do not use Address.parse(), so validation is
+    //  scoped to TON wallet destinations only.
+    if (!destination || destination.trim() === '') {
+      throw new BadRequestException('Destination address is required.');
+    }
+
+    if (destinationType === 'ton_wallet') {
+      try {
+        Address.parse(destination);
+      } catch {
+        throw new BadRequestException(
+          'Invalid TON address format. ' +
+          'Please provide a valid TON wallet address (e.g. EQD...abc).',
+        );
+      }
+    }
+
     // ── 1. Pre-flight: verify user and wallet exist (read-only, outside tx) ──
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
