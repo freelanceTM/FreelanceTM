@@ -32,8 +32,8 @@ export class WalletsService {
       const wallet = WalletContractV4.create({ publicKey: keyPair.publicKey, workchain: 0 });
       const address = wallet.address.toString({ bounceable: false });
 
-      const encryptedMnemonic = encrypt(mnemonicString, masterKey);
-      const encryptedPrivateKey = encrypt(Buffer.from(keyPair.secretKey).toString('base64'), masterKey);
+      const encryptedMnemonic    = await encrypt(mnemonicString, masterKey);
+      const encryptedPrivateKey  = await encrypt(Buffer.from(keyPair.secretKey).toString('base64'), masterKey);
 
       return this.prisma.wallet.create({
         data: {
