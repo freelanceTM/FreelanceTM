@@ -105,34 +105,69 @@ export class AdminService {
   }
 
   async approvePayment(paymentId: number, adminUserId: number) {
-    const payment = await this.prisma.payment.findUnique({ where: { id: paymentId } });
-    if (!payment) throw new NotFoundException('Payment not found');
-    if (payment.status !== 'pending') throw new BadRequestException('Payment already processed');
+    // H-2 fix: all three writes are now a single ACID transaction.
+    //
+    // Root causes fixed:
+    //  1. wallet.balanceNano was NEVER credited — funds were silently discarded.
+    //  2. TOCTOU race: two concurrent admins could both read status='pending',
+    //     both proceed, and double-credit once the wallet update was added.
+    //  3. Non-atomic writes: payment.update + transaction.create could
+    //     partially succeed, leaving the DB in an inconsistent state.
+    //
+    // Fix: CAS via updateMany(WHERE status='pending') — count=0 means already
+    // processed or not found; wallet.update is inside the same tx so the credit
+    // is guaranteed-once or the whole thing rolls back.
+    const reviewedAt = new Date();
 
-    const updated = await this.prisma.payment.update({
-      where: { id: paymentId },
-      data: { status: 'approved', reviewedById: adminUserId, reviewedAt: new Date() },
+    const approved = await this.prisma.$transaction(async (tx) => {
+      // CAS: atomically mark pending → approved; prevents double-approval race
+      const cas = await tx.payment.updateMany({
+        where: { id: paymentId, status: 'pending' },
+        data: { status: 'approved', reviewedById: adminUserId, reviewedAt },
+      });
+
+      if (cas.count === 0) {
+        const existing = await tx.payment.findUnique({ where: { id: paymentId } });
+        if (!existing) throw new NotFoundException('Payment not found');
+        throw new BadRequestException('Payment already processed');
+      }
+
+      // Re-fetch so we have all fields (needed for amountManat and event)
+      const payment = await tx.payment.findUnique({ where: { id: paymentId } });
+
+      const amountNano = BigInt(Math.round(Number(payment!.amountManat) * 1e9));
+
+      // Create deposit transaction log
+      await tx.transaction.create({
+        data: {
+          userId: payment!.userId,
+          type: 'deposit',
+          status: 'completed',
+          amountNano,
+          currency: 'TON',
+          metadata: { paymentId, adminUserId, note: 'TM CELL approved' },
+        },
+      });
+
+      // Credit the user's wallet — this was the missing step (H-2 core fix)
+      // wallet.update throws if no wallet exists, rolling back the entire tx
+      // so the payment stays 'pending' and the admin gets a clear error.
+      await tx.wallet.update({
+        where: { userId: payment!.userId },
+        data: { balanceNano: { increment: amountNano } },
+      });
+
+      return payment!;
     });
 
-    // Create deposit transaction
-    await this.prisma.transaction.create({
-      data: {
-        userId: payment.userId,
-        type: 'deposit',
-        status: 'completed',
-        amountNano: BigInt(Math.round(Number(payment.amountManat) * 1e9)),
-        currency: 'TON',
-        metadata: { paymentId, adminUserId, note: 'TM CELL approved' },
-      },
-    });
-
+    // Emit outside the transaction — side-effect, non-critical
     this.eventEmitter.emit(EVENTS.PAYMENT_APPROVED, {
       paymentId,
-      userId: payment.userId,
-      amountManat: payment.amountManat.toString(),
+      userId: approved.userId,
+      amountManat: approved.amountManat.toString(),
     } as PaymentApprovedEvent);
 
-    return updated;
+    return approved;
   }
 
   async rejectPayment(paymentId: number, adminUserId: number, note?: string) {
