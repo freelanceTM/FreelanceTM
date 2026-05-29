@@ -1,7 +1,12 @@
-import { Injectable, Logger, NotFoundException, BadRequestException, ForbiddenException } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  NotFoundException,
+  BadRequestException,
+  ForbiddenException,
+} from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { PrismaService } from '../prisma/prisma.service';
-import { Prisma } from '@prisma/client';
 import { TonContractService } from '../ton/ton-contract.service';
 import { TonEventType } from '@prisma/client';
 import {
@@ -20,19 +25,50 @@ export class EscrowService {
     private tonContract: TonContractService,
   ) {}
 
-  async createEscrow(orderId: number, adminId?: number) {
+  /**
+   * Creates an escrow record for an order and transitions it to 'active'.
+   *
+   * @param orderId  - The order to escrow.
+   * @param adminId  - Reserved for future admin-initiated flows (currently unused).
+   * @param callerId - The authenticated user making the HTTP request.
+   *                   When supplied, must match order.buyerId (buyer-only action).
+   *                   Omit only for trusted internal calls (e.g. from OrdersService).
+   *
+   * The three DB writes (order update, transaction record, TON event) are
+   * executed inside a single Prisma interactive transaction.  The escrow-
+   * address uniqueness guard is re-checked *inside* the transaction so two
+   * concurrent requests cannot both slip through the initial check.
+   */
+  async createEscrow(orderId: number, adminId?: number, callerId?: number) {
+    // ── 1. Load order with related wallets ───────────────────────────────────
     const order = await this.prisma.order.findUnique({
       where: { id: orderId },
-      include: { buyer: { include: { wallet: true } }, seller: { include: { wallet: true } }, gig: true },
+      include: {
+        buyer: { include: { wallet: true } },
+        seller: { include: { wallet: true } },
+        gig: true,
+      },
     });
 
     if (!order) throw new NotFoundException('Order not found');
-    if (order.escrowAddress) throw new BadRequestException('Escrow already created');
 
-    // Convert price to nanoton (1 TMT ~ 1 TON placeholder, or real exchange rate)
+    // ── 2. Ownership check (HTTP callers only) ───────────────────────────────
+    if (callerId !== undefined && order.buyerId !== callerId) {
+      this.logger.warn(
+        `createEscrow: caller ${callerId} is not the buyer of order ${orderId} (buyer=${order.buyerId})`,
+      );
+      throw new ForbiddenException('Only the buyer can create an escrow for this order');
+    }
+
+    if (order.escrowAddress) {
+      throw new BadRequestException('Escrow already created for this order');
+    }
+
+    // ── 3. Compute amount ────────────────────────────────────────────────────
     const amountNano = BigInt(Math.round(Number(order.totalPrice) * 1e9));
 
-    // Try to create on-chain escrow
+    // ── 4. Best-effort on-chain escrow (outside DB tx — blockchain is not
+    //       transactional; we proceed even if it fails) ──────────────────────
     let escrowAddress: string | null = null;
     if (
       this.tonContract.isConfigured() &&
@@ -47,109 +83,206 @@ export class EscrowService {
           amountNano,
         );
         escrowAddress = process.env.ESCROW_CONTRACT_ADDRESS || null;
-        this.logger.log(`On-chain escrow created for order ${orderId}, tx: ${tx?.seqno}`);
+        this.logger.log(
+          `On-chain escrow created for order ${orderId}, seqno: ${tx?.seqno}`,
+        );
       } catch (err) {
-        this.logger.warn(`Failed to create on-chain escrow, falling back: ${err.message}`);
+        this.logger.warn(
+          `Failed to create on-chain escrow for order ${orderId}, falling back to simulation: ${err.message}`,
+        );
       }
     }
 
-    // Fallback or simulation
     if (!escrowAddress) {
       escrowAddress = `EQ_SIM_${orderId}_${Date.now()}`;
     }
 
-    const updated = await this.prisma.order.update({
-      where: { id: orderId },
-      data: {
-        escrowAddress,
-        status: 'active',
-      },
-      include: { buyer: true, seller: true, gig: true },
+    // ── 5. Atomic DB writes ──────────────────────────────────────────────────
+    //  Re-check escrowAddress inside the transaction to close the race window
+    //  between two concurrent createEscrow requests for the same order.
+    const updated = await this.prisma.$transaction(async (tx) => {
+      const fresh = await tx.order.findUnique({
+        where: { id: orderId },
+        select: { escrowAddress: true },
+      });
+
+      if (fresh?.escrowAddress) {
+        throw new BadRequestException('Escrow already created for this order');
+      }
+
+      const updatedOrder = await tx.order.update({
+        where: { id: orderId },
+        data: { escrowAddress, status: 'active' },
+        include: { buyer: true, seller: true, gig: true },
+      });
+
+      await tx.transaction.create({
+        data: {
+          userId: order.buyerId,
+          type: 'escrow_create',
+          status: 'completed',
+          amountNano,
+          currency: 'TON',
+          metadata: { orderId, escrowAddress },
+        },
+      });
+
+      await tx.tonEvent.create({
+        data: {
+          contractAddress: escrowAddress,
+          eventType: TonEventType.escrow_created,
+          payload: { orderId, amountNano: amountNano.toString() },
+        },
+      });
+
+      return updatedOrder;
     });
 
-    // Record platform escrow transaction (freeze)
-    await this.prisma.transaction.create({
-      data: {
-        userId: order.buyerId,
-        type: 'escrow_create',
-        status: 'completed',
-        amountNano,
-        currency: 'TON',
-        metadata: { orderId, escrowAddress },
-      },
-    });
+    this.logger.log(
+      `Escrow created — address: ${escrowAddress}, order: ${orderId}, buyer: ${order.buyerId}`,
+    );
 
-    // Store TON event for indexer
-    await this.prisma.tonEvent.create({
-      data: {
-        contractAddress: escrowAddress,
-        eventType: TonEventType.escrow_created,
-        payload: { orderId, amountNano: amountNano.toString() },
-      },
-    });
-
-    this.logger.log(`Escrow ${escrowAddress} for order ${orderId}`);
     return this.mapOrder(updated);
   }
 
+  /**
+   * Releases escrowed funds to the seller after the buyer confirms delivery.
+   *
+   * Double-spend protection (C-3):
+   *   All five DB writes are wrapped in a single Prisma interactive transaction.
+   *   The order status transition uses a compare-and-swap (CAS) via `updateMany`
+   *   with the expected prior state (`status: 'delivered'`) in the WHERE clause.
+   *
+   *   PostgreSQL acquires a row-level exclusive lock during the UPDATE. Under
+   *   two concurrent releaseEscrow calls that both pass the pre-check above:
+   *     • Request A enters the tx, gets the lock → WHERE matches → count=1 → commits.
+   *     • Request B waits for A's lock; A has committed `status='completed'`,
+   *       so B's WHERE finds 0 rows → count=0 → throws → full rollback of all
+   *       five writes (status, wallet credit, ledger record, stats, TON event).
+   *
+   *   The blockchain call intentionally lives OUTSIDE the transaction — it is
+   *   best-effort and non-transactional by nature. The EventEmitter notification
+   *   also fires outside so it is only triggered after a successful DB commit.
+   */
   async releaseEscrow(orderId: number, userId: number) {
+    // ── 1. Load order for pre-flight validation (read-only, outside tx) ─────
     const order = await this.prisma.order.findUnique({
       where: { id: orderId },
-      include: { buyer: { include: { wallet: true } }, seller: { include: { wallet: true } } },
+      include: {
+        buyer: { include: { wallet: true } },
+        seller: { include: { wallet: true } },
+      },
     });
+
     if (!order) throw new NotFoundException('Order not found');
-    if (order.buyerId !== userId) throw new ForbiddenException('Only buyer can release');
-    if (order.status !== 'delivered') throw new BadRequestException('Order must be delivered first');
+    if (order.buyerId !== userId) {
+      throw new ForbiddenException('Only the buyer can release escrow for this order');
+    }
+    if (order.status !== 'delivered') {
+      throw new BadRequestException(
+        `Order must be in 'delivered' state to release escrow (current: '${order.status}')`,
+      );
+    }
+    if (!order.seller.wallet) {
+      throw new BadRequestException(
+        'Seller does not have a custodial wallet — cannot credit funds',
+      );
+    }
 
     const amountNano = BigInt(Math.round(Number(order.totalPrice) * 1e9));
 
-    // Try on-chain release
-    if (this.tonContract.isConfigured() && order.escrowAddress && !order.escrowAddress.startsWith('EQ_SIM')) {
+    // ── 2. Best-effort on-chain release (outside tx — blockchain is not
+    //       transactional; DB state is the source of truth) ─────────────────
+    if (
+      this.tonContract.isConfigured() &&
+      order.escrowAddress &&
+      !order.escrowAddress.startsWith('EQ_SIM')
+    ) {
       try {
-        await this.tonContract.resolveDispute(orderId, 1, 10000); // resolution=1 = release seller
-        this.logger.log(`On-chain release for order ${orderId}`);
+        await this.tonContract.resolveDispute(orderId, 1, 10000); // 1 = release to seller
+        this.logger.log(`On-chain escrow released for order ${orderId}`);
       } catch (err) {
-        this.logger.warn(`On-chain release failed: ${err.message}`);
+        this.logger.warn(
+          `On-chain release failed for order ${orderId} (DB release will still proceed): ${err.message}`,
+        );
       }
     }
 
-    await this.prisma.transaction.create({
-      data: {
-        userId: order.sellerId,
-        type: 'escrow_release',
-        status: 'completed',
-        amountNano,
-        currency: 'TON',
-        metadata: { orderId, escrowAddress: order.escrowAddress },
-      },
-    });
+    // ── 3. ACID transaction — all five writes share one boundary ─────────────
+    const updated = await this.prisma.$transaction(async (tx) => {
+      // ── 3a. Compare-and-swap: delivered → completed ──────────────────────
+      //
+      //  This is the TOCTOU guard. Only one concurrent transaction can match
+      //  `status='delivered'` and advance the row — the loser gets count=0.
+      const swapResult = await tx.order.updateMany({
+        where: { id: orderId, status: 'delivered' },
+        data: { status: 'completed', completedAt: new Date() },
+      });
 
-    const updated = await this.prisma.order.update({
-      where: { id: orderId },
-      data: { status: 'completed', completedAt: new Date() },
-      include: { buyer: true, seller: true, gig: true },
-    });
+      if (swapResult.count === 0) {
+        this.logger.warn(
+          `[CAS] releaseEscrow failed for order ${orderId} — status was no longer 'delivered'. ` +
+          `Possible concurrent release by user ${userId}.`,
+        );
+        throw new BadRequestException(
+          'Escrow release failed: order is no longer in delivered state. ' +
+          'It may have already been completed by a concurrent request.',
+        );
+      }
 
-    // Increment seller stats
-    await this.prisma.user.update({
-      where: { id: order.sellerId },
-      data: { completedOrders: { increment: 1 } },
-    });
+      // ── 3b. Fetch the updated order for the response payload ─────────────
+      const updatedOrder = await tx.order.findUnique({
+        where: { id: orderId },
+        include: { buyer: true, seller: true, gig: true },
+      });
 
-    await this.prisma.tonEvent.create({
-      data: {
-        contractAddress: order.escrowAddress,
-        eventType: TonEventType.escrow_confirmed,
-        payload: { orderId },
-      },
-    });
+      // ── 3c. Credit seller's custodial wallet balance ──────────────────────
+      await tx.wallet.update({
+        where: { userId: order.sellerId },
+        data: { balanceNano: { increment: amountNano } },
+      });
 
-    // Emit notification
+      // ── 3d. Immutable accounting ledger entry ─────────────────────────────
+      await tx.transaction.create({
+        data: {
+          userId: order.sellerId,
+          type: 'escrow_release',
+          status: 'completed',
+          amountNano,
+          currency: 'TON',
+          metadata: { orderId, escrowAddress: order.escrowAddress },
+        },
+      });
+
+      // ── 3e. Seller reputation / stats counter ─────────────────────────────
+      await tx.user.update({
+        where: { id: order.sellerId },
+        data: { completedOrders: { increment: 1 } },
+      });
+
+      // ── 3f. TON event log for the indexer ────────────────────────────────
+      await tx.tonEvent.create({
+        data: {
+          contractAddress: order.escrowAddress,
+          eventType: TonEventType.escrow_confirmed,
+          payload: { orderId },
+        },
+      });
+
+      return updatedOrder;
+    }); // ← entire block rolls back if any step throws
+
+    // ── 4. Post-commit side effects (fired only after successful DB commit) ──
     this.eventEmitter.emit(EVENTS.ESCROW_RELEASED, {
       orderId,
       sellerId: order.sellerId,
       amountNano: amountNano.toString(),
     } as EscrowReleasedEvent);
+
+    this.logger.log(
+      `[ESCROW] Released — order ${orderId}, seller ${order.sellerId}, ` +
+      `amount ${amountNano} nano, buyer ${userId}`,
+    );
 
     return this.mapOrder(updated);
   }
@@ -160,12 +293,16 @@ export class EscrowService {
 
     const amountNano = BigInt(Math.round(Number(order.totalPrice) * 1e9));
 
-    // Try on-chain refund
-    if (this.tonContract.isConfigured() && order.escrowAddress && !order.escrowAddress.startsWith('EQ_SIM')) {
+    // Best-effort on-chain refund
+    if (
+      this.tonContract.isConfigured() &&
+      order.escrowAddress &&
+      !order.escrowAddress.startsWith('EQ_SIM')
+    ) {
       try {
-        await this.tonContract.resolveDispute(orderId, 0, 0); // resolution=0 = refund buyer
+        await this.tonContract.resolveDispute(orderId, 0, 0); // resolution=0 → refund buyer
       } catch (err) {
-        this.logger.warn(`On-chain refund failed: ${err.message}`);
+        this.logger.warn(`On-chain refund failed for order ${orderId}: ${err.message}`);
       }
     }
 
@@ -203,40 +340,75 @@ export class EscrowService {
     return this.mapOrder(updated);
   }
 
-  async markDelivered(orderId: number) {
+  /**
+   * Marks an order as delivered (seller initiates work hand-off).
+   *
+   * @param orderId  - The order being delivered.
+   * @param callerId - The authenticated user making the HTTP request.
+   *                   When supplied, must match order.sellerId (seller-only action).
+   *                   Omit only for trusted internal calls (e.g. from OrdersService).
+   *
+   * Pre-conditions enforced:
+   *   - Order must exist.
+   *   - Order must be in 'active' status (prevents double-delivery on
+   *     already-delivered, completed, disputed, or cancelled orders).
+   *   - callerId (when supplied) must be the seller of the order.
+   */
+  async markDelivered(orderId: number, callerId?: number) {
     const order = await this.prisma.order.findUnique({ where: { id: orderId } });
     if (!order) throw new NotFoundException('Order not found');
 
-    // Try on-chain mark delivered
-    if (this.tonContract.isConfigured() && order.escrowAddress && !order.escrowAddress.startsWith('EQ_SIM')) {
+    // ── Ownership check (HTTP callers only) ──────────────────────────────────
+    if (callerId !== undefined && order.sellerId !== callerId) {
+      this.logger.warn(
+        `markDelivered: caller ${callerId} is not the seller of order ${orderId} (seller=${order.sellerId})`,
+      );
+      throw new ForbiddenException('Only the seller can mark this order as delivered');
+    }
+
+    // ── Status pre-condition ─────────────────────────────────────────────────
+    if (order.status !== 'active') {
+      throw new BadRequestException(
+        `Cannot mark order as delivered from status '${order.status}'. Order must be active.`,
+      );
+    }
+
+    // Best-effort on-chain mark-delivered
+    if (
+      this.tonContract.isConfigured() &&
+      order.escrowAddress &&
+      !order.escrowAddress.startsWith('EQ_SIM')
+    ) {
       try {
         await this.tonContract.markDelivered(orderId);
+        this.logger.log(`On-chain markDelivered for order ${orderId}`);
       } catch (err) {
-        this.logger.warn(`On-chain markDelivered failed: ${err.message}`);
+        this.logger.warn(`On-chain markDelivered failed for order ${orderId}: ${err.message}`);
       }
     }
 
-    return this.prisma.order.update({
+    const updated = await this.prisma.order.update({
       where: { id: orderId },
       data: { status: 'delivered', updatedAt: new Date() },
     });
+
+    this.logger.log(
+      `Order ${orderId} marked as delivered by seller ${callerId ?? '(internal)'}`,
+    );
+
+    return updated;
   }
 
   async openDispute(orderId: number, userId: number) {
     const order = await this.prisma.order.findUnique({ where: { id: orderId } });
     if (!order) throw new NotFoundException('Order not found');
     if (order.status !== 'delivered' && order.status !== 'active') {
-      throw new BadRequestException('Cannot dispute now');
+      throw new BadRequestException('Cannot dispute an order in its current state');
     }
 
-    if (this.tonContract.isConfigured() && order.escrowAddress && !order.escrowAddress.startsWith('EQ_SIM')) {
-      try {
-        // Backend cannot directly open dispute from non-owner; dispute is opened by party
-        // In on-chain model the buyer/seller sends message from their wallet
-        // For MVP we skip on-chain dispute opening and just record locally
-      } catch {
-        // ignore
-      }
+    // Ownership: only buyer or seller can open a dispute
+    if (order.buyerId !== userId && order.sellerId !== userId) {
+      throw new ForbiddenException('Only a participant of this order can open a dispute');
     }
 
     await this.prisma.tonEvent.create({

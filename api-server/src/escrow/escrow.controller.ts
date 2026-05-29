@@ -1,4 +1,4 @@
-import { Controller, Post, Param, ParseIntPipe, UseGuards, Body } from '@nestjs/common';
+import { Controller, Post, Param, ParseIntPipe, UseGuards } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
 import { EscrowService } from './escrow.service';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
@@ -13,12 +13,18 @@ import { RolesGuard } from '../common/guards/roles.guard';
 export class EscrowController {
   constructor(private escrowService: EscrowService) {}
 
+  /**
+   * Buyer only. Verified against order.buyerId inside the service.
+   * The DB writes (order update, transaction record, TON event) are
+   * executed inside a single Prisma transaction — see escrow.service.ts.
+   */
   @Post('order/:orderId/create')
-  @ApiOperation({ summary: 'Create escrow for an order (platform automation)' })
+  @ApiOperation({ summary: 'Create escrow for an order (buyer only)' })
   async createEscrow(
+    @CurrentUser('sub') userId: number,
     @Param('orderId', ParseIntPipe) orderId: number,
   ) {
-    return this.escrowService.createEscrow(orderId);
+    return this.escrowService.createEscrow(orderId, undefined, userId);
   }
 
   @Post('order/:orderId/release')
@@ -41,12 +47,17 @@ export class EscrowController {
     return this.escrowService.refundEscrow(orderId, adminId);
   }
 
+  /**
+   * Seller only. Verified against order.sellerId inside the service.
+   * Order must be in 'active' status.
+   */
   @Post('order/:orderId/deliver')
-  @ApiOperation({ summary: 'Mark order as delivered in escrow (platform)' })
+  @ApiOperation({ summary: 'Mark order as delivered (seller only)' })
   async markDelivered(
+    @CurrentUser('sub') userId: number,
     @Param('orderId', ParseIntPipe) orderId: number,
   ) {
-    return this.escrowService.markDelivered(orderId);
+    return this.escrowService.markDelivered(orderId, userId);
   }
 
   @Post('order/:orderId/dispute')
