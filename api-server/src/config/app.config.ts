@@ -25,6 +25,8 @@ export default registerAs('app', () => ({
 
   adminSecret: process.env.ADMIN_SECRET,
 
+  telegramWebhookSecret: process.env.TELEGRAM_WEBHOOK_SECRET,
+
   maxFileSizeMb: parseInt(process.env.MAX_FILE_SIZE_MB, 10) || 10,
   uploadsDir: process.env.UPLOADS_DIR || './uploads',
 }));

@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { createHmac } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
 
 @Injectable()
@@ -34,14 +35,39 @@ export class WebhooksService {
 
     for (const hook of hooks) {
       try {
+        // M-3 fix — HMAC-SHA256 payload signing:
+        //
+        //  The original code transmitted the raw `hook.secret` in the
+        //  `X-Webhook-Secret` header. This exposes the long-lived shared secret
+        //  in every request (logs, proxies, CDN edge nodes). An intercepted
+        //  request leaks the secret permanently; the attacker can then forge
+        //  arbitrary future payloads.
+        //
+        //  Fix: never send the secret itself. Instead sign the serialised body
+        //  with HMAC-SHA256 (same scheme used by GitHub, Stripe, Shopify):
+        //
+        //    signature = hex(HMAC-SHA256(key=hook.secret, msg=body))
+        //
+        //  The `X-Webhook-Signature` header carries only the derived MAC — the
+        //  secret stays on both sides and is never transmitted. Receivers verify
+        //  by computing the same HMAC over the raw body and comparing with
+        //  timingSafeEqual to prevent timing oracles.
+        //
+        //  `X-Webhook-Timestamp` lets receivers reject replayed requests older
+        //  than their tolerance window (recommended: 5 minutes).
+        const timestamp   = new Date().toISOString();
+        const body        = JSON.stringify({ event, payload, timestamp });
+        const signature   = createHmac('sha256', hook.secret).update(body).digest('hex');
+
         const res = await fetch(hook.url, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            'X-Webhook-Secret': hook.secret,
-            'X-Webhook-Event': event,
+            'X-Webhook-Event':     event,
+            'X-Webhook-Timestamp': timestamp,
+            'X-Webhook-Signature': `sha256=${signature}`,
           },
-          body: JSON.stringify({ event, payload, timestamp: new Date().toISOString() }),
+          body,
         });
         if (!res.ok) {
           await this.prisma.webhook.update({
