@@ -116,23 +116,21 @@ export class OrdersService {
       await this.escrow.openDispute(orderId, userId);
     }
 
-    const updateData: Prisma.OrderUpdateInput = { status: newStatus };
-    if (newStatus === 'completed') {
-      updateData.completedAt = new Date();
-    }
-
+    // H-3 fix: `completedAt` is no longer set here.
+    // `releaseEscrow()` (C-3) already sets it atomically inside its
+    // $transaction CAS step — overwriting it here would replace the
+    // canonical, in-transaction timestamp with a later, post-commit one.
+    //
+    // H-3 fix: the `completedOrders` increment has also been removed from
+    // this method.  `releaseEscrow()` owns that counter exclusively at
+    // step 3e of its $transaction.  The previous duplicate increment here
+    // caused every completed order to inflate the seller's reputation score
+    // by 2 instead of 1.
     const updated = await this.prisma.order.update({
       where: { id: orderId },
-      data: updateData,
+      data: { status: newStatus },
       include: { gig: true, buyer: true, seller: true },
     });
-
-    if (newStatus === 'completed') {
-      await this.prisma.user.update({
-        where: { id: order.sellerId },
-        data: { completedOrders: { increment: 1 } },
-      });
-    }
 
     // Emit status change notification
     this.eventEmitter.emit(EVENTS.ORDER_STATUS_CHANGED, {
