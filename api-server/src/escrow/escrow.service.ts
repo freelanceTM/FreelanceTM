@@ -287,13 +287,45 @@ export class EscrowService {
     return this.mapOrder(updated);
   }
 
+  /**
+   * Refunds escrowed funds to the buyer (admin-initiated, e.g. dispute ruled for buyer).
+   *
+   * H-4 fix — three root causes addressed:
+   *
+   *  1. wallet.balanceNano was NEVER credited — funds were silently lost.
+   *     wallet.update({ balanceNano: { increment: amountNano } }) is now inside
+   *     the transaction.
+   *
+   *  2. Three bare writes (transaction.create, order.update, tonEvent.create)
+   *     were outside any transaction — a mid-flight crash left the DB
+   *     half-updated.  All four writes now share one $transaction boundary.
+   *
+   *  3. No CAS guard — a second concurrent refund call would go through silently
+   *     and, with the wallet credit now present, would double-refund the buyer.
+   *     Fixed with updateMany(WHERE status NOT IN ['cancelled','completed']).
+   *
+   * Pattern mirrors releaseEscrow (C-3 / H-4): blockchain call stays outside
+   * the transaction (best-effort, non-transactional by nature), event emission
+   * fires only after a successful DB commit.
+   */
   async refundEscrow(orderId: number, adminId: number) {
-    const order = await this.prisma.order.findUnique({ where: { id: orderId } });
+    // ── 1. Load order + buyer wallet (read-only pre-flight) ──────────────────
+    const order = await this.prisma.order.findUnique({
+      where: { id: orderId },
+      include: { buyer: { include: { wallet: true } } },
+    });
     if (!order) throw new NotFoundException('Order not found');
+
+    if (!order.buyer.wallet) {
+      throw new BadRequestException(
+        'Buyer does not have a custodial wallet — cannot issue refund',
+      );
+    }
 
     const amountNano = BigInt(Math.round(Number(order.totalPrice) * 1e9));
 
-    // Best-effort on-chain refund
+    // ── 2. Best-effort on-chain refund (outside tx — blockchain is not
+    //       transactional; DB state is the source of truth) ─────────────────
     if (
       this.tonContract.isConfigured() &&
       order.escrowAddress &&
@@ -306,36 +338,68 @@ export class EscrowService {
       }
     }
 
-    await this.prisma.transaction.create({
-      data: {
-        userId: order.buyerId,
-        type: 'escrow_refund',
-        status: 'completed',
-        amountNano,
-        currency: 'TON',
-        metadata: { orderId, escrowAddress: order.escrowAddress, byAdmin: adminId },
-      },
-    });
+    // ── 3. ACID transaction — all four writes share one boundary ─────────────
+    const updated = await this.prisma.$transaction(async (tx) => {
+      // ── 3a. CAS: prevent double-refund — only proceed from a non-final state
+      const cas = await tx.order.updateMany({
+        where: { id: orderId, status: { notIn: ['cancelled', 'completed'] } },
+        data: { status: 'cancelled' },
+      });
 
-    const updated = await this.prisma.order.update({
-      where: { id: orderId },
-      data: { status: 'cancelled' },
-      include: { buyer: true, seller: true, gig: true },
-    });
+      if (cas.count === 0) {
+        const existing = await tx.order.findUnique({ where: { id: orderId } });
+        if (!existing) throw new NotFoundException('Order not found');
+        throw new BadRequestException(
+          `Cannot refund order in '${existing.status}' state`,
+        );
+      }
 
-    await this.prisma.tonEvent.create({
-      data: {
-        contractAddress: order.escrowAddress,
-        eventType: TonEventType.escrow_refunded,
-        payload: { orderId },
-      },
-    });
+      // ── 3b. Immutable accounting ledger entry ─────────────────────────────
+      await tx.transaction.create({
+        data: {
+          userId: order.buyerId,
+          type: 'escrow_refund',
+          status: 'completed',
+          amountNano,
+          currency: 'TON',
+          metadata: { orderId, escrowAddress: order.escrowAddress, byAdmin: adminId },
+        },
+      });
 
+      // ── 3c. H-4 core fix: credit buyer's custodial wallet ─────────────────
+      //  wallet.update throws if the wallet row disappears between pre-check
+      //  and here — the transaction rolls back (safe failure mode).
+      await tx.wallet.update({
+        where: { userId: order.buyerId },
+        data: { balanceNano: { increment: amountNano } },
+      });
+
+      // ── 3d. TON event log for the indexer ────────────────────────────────
+      await tx.tonEvent.create({
+        data: {
+          contractAddress: order.escrowAddress,
+          eventType: TonEventType.escrow_refunded,
+          payload: { orderId },
+        },
+      });
+
+      return tx.order.findUnique({
+        where: { id: orderId },
+        include: { buyer: true, seller: true, gig: true },
+      });
+    }); // ← entire block rolls back if any step throws
+
+    // ── 4. Post-commit side effects (fired only after successful DB commit) ──
     this.eventEmitter.emit(EVENTS.ESCROW_REFUNDED, {
       orderId,
       buyerId: order.buyerId,
       amountNano: amountNano.toString(),
     } as EscrowRefundedEvent);
+
+    this.logger.log(
+      `[ESCROW] Refunded — order ${orderId}, buyer ${order.buyerId}, ` +
+      `amount ${amountNano} nano, admin ${adminId}`,
+    );
 
     return this.mapOrder(updated);
   }
