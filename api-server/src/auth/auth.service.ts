@@ -337,7 +337,7 @@ export class AuthService {
     refreshToken: string,
     jti: string,
   ): Promise<void> {
-    const hash = await bcrypt.hash(refreshToken, 10);
+    const hash = await bcrypt.hash(refreshToken, 12);
     const refreshExpiration = this.config.get<string>('jwtRefreshExpiration', '7d');
     const expiresSeconds = this.parseDurationToSeconds(refreshExpiration) || 604800;
     const expiresAt = new Date(Date.now() + expiresSeconds * 1000);
