@@ -70,16 +70,20 @@ export class UsersController {
   }
 
   // Legacy compatibility: old frontend calls POST /api/users/register
+  //
+  // H-1 fix: `role` is no longer accepted from the request body — it was
+  // previously passed verbatim to legacyCreate(), allowing any caller to create
+  // an account with role='admin' without any authentication.
+  // Role is now hardcoded to 'client' inside legacyCreate().
   @Post('register')
   @ApiOperation({ summary: 'Legacy register/login (fallback)' })
-  async legacyRegister(@Body() body: { username: string; email: string; role?: string; displayName?: string }) {
-    // Find or create by email
+  async legacyRegister(@Body() body: { username: string; email: string; displayName?: string }) {
+    // Find or create by email — role is always 'client', never caller-supplied
     let user = await this.usersService.findByEmail(body.email);
     if (!user) {
       user = await this.usersService.legacyCreate({
         username: body.username,
         email: body.email,
-        role: (body.role as any) || 'client',
         displayName: body.displayName || body.username,
       });
     }

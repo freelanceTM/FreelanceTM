@@ -92,13 +92,21 @@ export class UsersService {
     return user ? this.mapUser(user) : null;
   }
 
-  async legacyCreate(data: { username: string; email: string; role: any; displayName: string }) {
+  /**
+   * Creates a user via the legacy email-based registration path.
+   *
+   * H-1 fix: `role` is removed from the parameter type entirely.
+   * Previously the caller could pass any role string (including 'admin'),
+   * which was stored verbatim.  Role is now hardcoded to 'client' — the only
+   * safe default for an unauthenticated registration path.
+   */
+  async legacyCreate(data: { username: string; email: string; displayName: string }) {
     const user = await this.prisma.user.create({
       data: {
         username: data.username,
         email: data.email,
         displayName: data.displayName,
-        role: data.role || 'client',
+        role: 'client',
         skills: [],
         portfolioUrls: [],
         languages: ['ru'],
