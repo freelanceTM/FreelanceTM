@@ -23,14 +23,18 @@ class CreateOrderDto {
   packageId?: number;
   /** S2-4: IDs of active GigExtras to add to the order. Optional. */
   extraIds?: number[];
+  /**
+   * S3-2: Promotional discount code.
+   * Applied atomically inside the order $transaction — race-safe for single-use codes.
+   * 'percent' type: reduces price by value%. 'fixed' type: subtracts value (floor at 0).
+   */
+  promoCode?: string;
   requirements?: string;
 }
 
 /**
  * S2-2: Extended status update DTO.
- *
  * revisionNote is only consumed when status === 'revision_requested'.
- * The seller reads this note to understand what the buyer wants changed.
  */
 class UpdateStatusDto {
   status: 'pending' | 'active' | 'delivered' | 'revision_requested' | 'completed' | 'cancelled' | 'disputed';
@@ -60,9 +64,8 @@ export class OrdersController {
   @ApiOperation({
     summary: 'Create an order from a gig',
     description:
-      'Supports optional package selection (S2-3) and extras (S2-4). ' +
-      'If packageId is supplied, price/deliveryDays/revisions are taken from that package. ' +
-      'extraIds adds line-item extras to the order with their individual prices summed in.',
+      'Supports optional package (S2-3), extras (S2-4), and promo code (S3-2). ' +
+      'Response includes grossPrice and discountAmount when a promo code is applied.',
   })
   async create(@CurrentUser('sub') userId: number, @Body() dto: CreateOrderDto) {
     return this.ordersService.create(userId, dto);
@@ -76,7 +79,7 @@ export class OrdersController {
   }
 
   @Get(':id')
-  @ApiOperation({ summary: 'Get order details (includes package and extras ledger)' })
+  @ApiOperation({ summary: 'Get order details (includes package, extras ledger, revision info)' })
   async findOne(@CurrentUser('sub') userId: number, @Param('id', ParseIntPipe) id: number) {
     return this.ordersService.findOne(userId, id);
   }
@@ -90,9 +93,7 @@ export class OrdersController {
       '  active → delivered (seller)\n' +
       '  delivered → completed | revision_requested | disputed (buyer)\n' +
       '  revision_requested → delivered (seller — re-delivers after revisions)\n\n' +
-      'S2-2: When transitioning to revision_requested, supply revisionNote so the ' +
-      'seller knows what to change. revisionsUsed is incremented automatically and ' +
-      'cannot exceed revisionsAllowed (set from the chosen package at order creation).',
+      'S2-2: Supply revisionNote when transitioning to revision_requested.',
   })
   async updateStatus(
     @CurrentUser('sub') userId: number,
@@ -106,14 +107,8 @@ export class OrdersController {
 
   /**
    * S1-4: Structured dispute filing.
-   *
-   * Creates a Dispute record in the database (admin can track and resolve it)
-   * and transitions the order to 'disputed' state with escrow locked.
-   * Either the buyer or seller can file a dispute on an active, delivered,
-   * or revision_requested order.
-   *
-   * POST /orders/:id/dispute
-   * Body: { "reason": "Seller did not deliver what was agreed" }
+   * Creates a Dispute record + transitions order to 'disputed'.
+   * Prefer this over PATCH /status { status: disputed } which has no DB record.
    */
   @Post(':id/dispute')
   @HttpCode(HttpStatus.CREATED)
@@ -128,14 +123,9 @@ export class OrdersController {
 
   /**
    * S1-2: Review submission.
-   *
-   * Allows the buyer to submit a review for a completed order.
-   * Review enters 'pending' moderation queue.
-   * Once admin approves it, seller rating and gig rating are recalculated,
-   * and LevelsService re-evaluates the seller's tier (S2-1).
-   *
-   * POST /orders/:id/review
-   * Body: { "rating": 4, "comment": "Great work, delivered on time" }
+   * Buyer submits a review for a completed order.
+   * Enters moderation; on approval triggers rating recalculation (S1-2) and
+   * seller level re-evaluation (S2-1).
    */
   @Post(':id/review')
   @HttpCode(HttpStatus.CREATED)

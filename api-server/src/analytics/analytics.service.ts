@@ -1,8 +1,11 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
+import { Cron, CronExpression } from '@nestjs/schedule';
 import { PrismaService } from '../prisma/prisma.service';
 
 @Injectable()
 export class AnalyticsService {
+  private readonly logger = new Logger(AnalyticsService.name);
+
   constructor(private prisma: PrismaService) {}
 
   async getSellerAnalytics(userId: number) {
@@ -64,5 +67,36 @@ export class AnalyticsService {
 
   async trackGigClick(gigId: number) {
     await this.prisma.gig.update({ where: { id: gigId }, data: { clicks: { increment: 1 } } });
+  }
+
+  /**
+   * S3-4: Daily analytics refresh — runs at 02:00 every night.
+   *
+   * Iterates all active sellers (users with at least one gig) and refreshes
+   * their SellerAnalytics snapshot. Runs sequentially to avoid spiking the
+   * DB with N concurrent aggregation queries.
+   *
+   * ScheduleModule is registered globally in AppModule.
+   */
+  @Cron(CronExpression.EVERY_DAY_AT_2AM)
+  async refreshAllSellerAnalytics(): Promise<void> {
+    this.logger.log('Daily seller analytics refresh started');
+
+    const sellers = await this.prisma.user.findMany({
+      where: { role: { in: ['freelancer', 'both'] } },
+      select: { id: true },
+    });
+
+    let refreshed = 0;
+    for (const seller of sellers) {
+      try {
+        await this.getSellerAnalytics(seller.id);
+        refreshed++;
+      } catch (err) {
+        this.logger.error(`Analytics refresh failed for userId ${seller.id}: ${err}`);
+      }
+    }
+
+    this.logger.log(`Daily seller analytics refresh complete — ${refreshed}/${sellers.length} sellers updated`);
   }
 }

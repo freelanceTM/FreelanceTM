@@ -33,6 +33,17 @@ export class GigsService {
     return this.mapGig(gig);
   }
 
+  /**
+   * S3-3: Full-text GIN search
+   *
+   * When a `search` query is provided, switches from ORM to a raw SQL
+   * `websearch_to_tsquery` query against the GIN-indexed `search_vector`
+   * tsvector column (maintained automatically by a DB trigger —
+   * see migration 20260530000003). Results are ranked by ts_rank relevance.
+   *
+   * Title carries weight A (highest), description B, tags C.
+   * Falls back to standard ORM query when search is absent.
+   */
   async findAll(params: {
     page?: number;
     limit?: number;
@@ -46,6 +57,11 @@ export class GigsService {
   }) {
     const { page = 1, limit = 20, categoryId, sellerId, search, minPrice, maxPrice, sortBy, requesterId } = params;
 
+    // Full-text search path — uses GIN index and ranked relevance
+    if (search && search.trim().length > 0) {
+      return this.findAllFullText({ search: search.trim(), page, limit, categoryId, sellerId });
+    }
+
     const where: Prisma.GigWhereInput = {};
     const isOwn = sellerId !== undefined && sellerId === requesterId;
     if (!isOwn) where.status = 'active';
@@ -53,7 +69,6 @@ export class GigsService {
     if (sellerId) where.sellerId = sellerId;
     if (minPrice !== undefined) where.price = { gte: new Prisma.Decimal(minPrice) };
     if (maxPrice !== undefined) where.price = { ...((where.price as object) || {}), lte: new Prisma.Decimal(maxPrice) };
-    if (search) where.title = { contains: search, mode: 'insensitive' };
 
     let orderBy: Prisma.GigOrderByWithRelationInput = { createdAt: 'desc' };
     if (sortBy === 'price_asc') orderBy = { price: 'asc' };
@@ -66,6 +81,61 @@ export class GigsService {
       this.prisma.gig.count({ where }),
     ]);
     return { data: gigs.map(this.mapGig), meta: { total, page, limit } };
+  }
+
+  /**
+   * Full-text search using PostgreSQL tsvector + GIN index.
+   * Gigs are returned ranked by relevance (ts_rank), not by creation date.
+   */
+  private async findAllFullText(params: {
+    search: string;
+    page: number;
+    limit: number;
+    categoryId?: number;
+    sellerId?: number;
+  }) {
+    const { search, page, limit, categoryId, sellerId } = params;
+    const offset = (page - 1) * limit;
+
+    const catFilter    = categoryId ? Prisma.sql`AND "categoryId" = ${categoryId}` : Prisma.empty;
+    const sellerFilter = sellerId   ? Prisma.sql`AND "sellerId"   = ${sellerId}`   : Prisma.empty;
+
+    const [rows, countRows] = await Promise.all([
+      this.prisma.$queryRaw<Array<{ id: number }>>(
+        Prisma.sql`
+          SELECT id FROM "gigs"
+          WHERE status = 'active'
+            AND "search_vector" @@ websearch_to_tsquery('simple', ${search})
+            ${catFilter} ${sellerFilter}
+          ORDER BY ts_rank("search_vector", websearch_to_tsquery('simple', ${search})) DESC
+          LIMIT ${limit} OFFSET ${offset}
+        `,
+      ),
+      this.prisma.$queryRaw<Array<{ count: bigint }>>(
+        Prisma.sql`
+          SELECT COUNT(*)::bigint AS count FROM "gigs"
+          WHERE status = 'active'
+            AND "search_vector" @@ websearch_to_tsquery('simple', ${search})
+            ${catFilter} ${sellerFilter}
+        `,
+      ),
+    ]);
+
+    const ids   = rows.map(r => r.id);
+    const total = Number(countRows[0]?.count ?? 0);
+
+    if (ids.length === 0) return { data: [], meta: { total: 0, page, limit } };
+
+    const gigs = await this.prisma.gig.findMany({
+      where: { id: { in: ids } },
+      include: { seller: true, category: true, extras: { where: { isActive: true } }, packages: { where: { isActive: true } } },
+    });
+
+    // Re-sort by ts_rank order (findMany does not preserve IN-clause ordering)
+    const gigMap = new Map(gigs.map(g => [g.id, g]));
+    const ranked = ids.map(id => gigMap.get(id)).filter((g): g is NonNullable<typeof g> => !!g);
+
+    return { data: ranked.map(this.mapGig), meta: { total, page, limit } };
   }
 
   async findFeatured() {
@@ -89,9 +159,18 @@ export class GigsService {
     return { totalFreelancers: freelancers, totalGigs: gigs, totalOrders: orders, topCategories: categories };
   }
 
+  /**
+   * S3-4: Gig view tracking.
+   * Increments gig.views on every GET /gigs/:id call.
+   * Fire-and-forget — never blocks the response.
+   */
   async findOne(id: number) {
     const gig = await this.prisma.gig.findUnique({ where: { id }, include: { seller: true, category: true, extras: { where: { isActive: true } }, packages: { where: { isActive: true } } } });
     if (!gig) throw new NotFoundException('Gig not found');
+
+    // Non-blocking view increment — error intentionally swallowed
+    this.prisma.gig.update({ where: { id }, data: { views: { increment: 1 } } }).catch(() => {});
+
     return this.mapGig(gig);
   }
 

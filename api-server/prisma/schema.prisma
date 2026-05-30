@@ -267,6 +267,7 @@ model Gig {
   views         Int        @default(0)
   clicks        Int        @default(0)
   conversionRate Float      @default(0)
+  searchVector  Unsupported("tsvector")?  // S3-3: maintained by DB trigger, used for GIN full-text search
   createdAt     DateTime   @default(now())
   updatedAt     DateTime   @updatedAt
 

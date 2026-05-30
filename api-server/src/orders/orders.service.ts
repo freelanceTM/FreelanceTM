@@ -9,6 +9,7 @@ import { EventEmitter2 } from '@nestjs/event-emitter';
 import { PrismaService } from '../prisma/prisma.service';
 import { OrderStatus, Prisma } from '@prisma/client';
 import { EscrowService } from '../escrow/escrow.service';
+import { PromocodesService } from '../promocodes/promocodes.service';
 import {
   EVENTS,
   OrderCreatedEvent,
@@ -22,21 +23,28 @@ export class OrdersService {
     private prisma: PrismaService,
     private eventEmitter: EventEmitter2,
     private escrow: EscrowService,
+    private promocodes: PromocodesService,
   ) {}
 
   /**
-   * Create a new gig order with optional package selection and extras.
+   * Create a new gig order with optional package, extras, and promo code.
    *
-   * S2-3: If packageId is supplied, the order inherits price, deliveryDays
-   *       and revisionsAllowed from that GigPackage (Basic / Standard / Premium).
-   *       When omitted, the gig's own price/deliveryDays/revisions are used.
+   * S2-3: packageId selects a GigPackage (Basic / Standard / Premium).
+   *       Price, deliveryDays, and revisionsAllowed are inherited from the package.
+   *       Falls back to gig-level defaults when omitted.
    *
-   * S2-4: Each extraId is validated against the gig's active extras.
-   *       Extra prices are summed and appended to the base price.
-   *       Each extra's deliveryDays are added to the final delivery window.
+   * S2-4: extraIds are validated against the gig's active extras.
+   *       Each extra's price is summed and delivery days accumulated.
    *       An OrderItem ledger row is created per extra inside the transaction.
    *
-   * All DB writes (order + items + gig.orderCount) are a single $transaction.
+   * S3-2: promoCode applies an atomic discount inside the $transaction.
+   *       'percent' type: price × (1 – value/100), floor at 0.
+   *       'fixed' type:   price – value, floor at 0.
+   *       Race-safe CAS: updateMany(WHERE usedCount < maxUses) — concurrent
+   *       redemptions cannot both succeed for a single-use code.
+   *
+   * All DB writes (order + items + gig.orderCount + promo.usedCount) are
+   * committed in a single ACID $transaction.
    */
   async create(
     userId: number,
@@ -44,6 +52,7 @@ export class OrdersService {
       gigId: number;
       packageId?: number;
       extraIds?: number[];
+      promoCode?: string;
       requirements?: string;
     },
   ) {
@@ -58,7 +67,7 @@ export class OrdersService {
     if (gig.sellerId === userId) throw new BadRequestException('Cannot order your own gig');
     if (gig.status !== 'active') throw new BadRequestException('Gig is not active');
 
-    // S2-3: Resolve base price / deliveryDays / revisions from selected package or gig defaults
+    // S2-3: Resolve base price / deliveryDays / revisions from package or gig defaults
     let basePrice: Prisma.Decimal = gig.price;
     let deliveryDays = gig.deliveryDays;
     let revisionsAllowed = gig.revisions;
@@ -77,7 +86,7 @@ export class OrdersService {
       packageId = pkg.id;
     }
 
-    // S2-4: Validate extras and compute surcharge + extra delivery days
+    // S2-4: Validate extras — must belong to this gig and be active
     const validExtras: Array<{ id: number; price: Prisma.Decimal; deliveryDays: number }> = [];
     let extraAdditionalDays = 0;
 
@@ -99,18 +108,58 @@ export class OrdersService {
       (sum, e) => sum.plus(e.price),
       new Prisma.Decimal(0),
     );
-    const totalPrice = basePrice.plus(extrasTotal);
+    const grossPrice = basePrice.plus(extrasTotal);
     const finalDeliveryDays = deliveryDays + extraAdditionalDays;
 
-    // Single ACID transaction: create order + OrderItem ledger + gig orderCount bump
-    const order = await this.prisma.$transaction(async (tx) => {
+    // Single ACID transaction: validate promo + create order + ledger + orderCount
+    const result = await this.prisma.$transaction(async (tx) => {
+      // S3-2: Promo code — validate and atomically consume inside the transaction
+      let finalPrice = grossPrice;
+      let discountAmount = new Prisma.Decimal(0);
+
+      if (data.promoCode) {
+        const promo = await tx.promoCode.findFirst({
+          where: {
+            code: data.promoCode.toUpperCase().trim(),
+            isActive: true,
+            OR: [{ expiresAt: null }, { expiresAt: { gte: new Date() } }],
+          },
+        });
+        if (!promo) {
+          throw new BadRequestException('Invalid or expired promo code');
+        }
+
+        // CAS consume: only succeeds if usedCount is still within limit
+        const { count } = await tx.promoCode.updateMany({
+          where: {
+            id: promo.id,
+            usedCount: { lt: promo.maxUses },
+          },
+          data: { usedCount: { increment: 1 } },
+        });
+        if (count === 0) {
+          throw new BadRequestException('Promo code has been fully used');
+        }
+
+        if (promo.type === 'percent') {
+          discountAmount = grossPrice.times(promo.value).dividedBy(100);
+        } else {
+          discountAmount = promo.value;
+        }
+        // Floor at zero — discount cannot exceed the order total
+        finalPrice = Prisma.Decimal.max(
+          grossPrice.minus(discountAmount),
+          new Prisma.Decimal(0),
+        );
+      }
+
       const created = await tx.order.create({
         data: {
           gigId: gig.id,
           buyerId: userId,
           sellerId: gig.sellerId,
           packageId,
-          totalPrice,
+          totalPrice: finalPrice,
           requirements: data.requirements?.trim() || '',
           deliveryDays: finalDeliveryDays,
           revisionsAllowed,
@@ -135,7 +184,7 @@ export class OrdersService {
         data: { orderCount: { increment: 1 } },
       });
 
-      return tx.order.findUnique({
+      const order = await tx.order.findUnique({
         where: { id: created.id },
         include: {
           gig: true,
@@ -145,28 +194,32 @@ export class OrdersService {
           items: { include: { extra: true } },
         },
       });
+
+      return { order: order!, grossPrice, finalPrice, discountAmount };
     });
 
-    // Escrow creation is non-fatal — order stays in 'pending' if it fails
-    try { await this.escrow.createEscrow(order!.id); } catch {}
+    const { order, grossPrice: gross, finalPrice: net, discountAmount: discount } = result;
+
+    // Escrow creation is non-fatal
+    try { await this.escrow.createEscrow(order.id); } catch {}
 
     this.eventEmitter.emit(EVENTS.ORDER_CREATED, {
-      orderId: order!.id,
-      buyerId: order!.buyerId,
-      sellerId: order!.sellerId,
-      gigTitle: order!.gig?.title ?? 'Order',
-      totalPrice: order!.totalPrice.toString(),
+      orderId: order.id,
+      buyerId: order.buyerId,
+      sellerId: order.sellerId,
+      gigTitle: order.gig?.title ?? 'Order',
+      totalPrice: order.totalPrice.toString(),
     } as OrderCreatedEvent);
 
-    return this.mapOrder(order!);
+    return {
+      ...this.mapOrder(order),
+      grossPrice: gross.toString(),
+      discountAmount: discount.toString(),
+    };
   }
 
   /**
    * S1-3: Tender → Order Bridge
-   *
-   * Creates an Order from a selected TenderBid without requiring a Gig.
-   * Called internally by TendersService.selectBid() immediately after the
-   * buyer selects a winning proposal from the tender exchange.
    */
   async createForTender(params: {
     buyerId: number;
@@ -254,15 +307,9 @@ export class OrdersService {
   /**
    * Advance an order through the state machine.
    *
-   * S2-2: The 'revision_requested' transition is gated:
-   *   - Only the buyer can request a revision, only from 'delivered'.
-   *   - revisionsUsed must be < revisionsAllowed (set at order creation
-   *     from the chosen package, or 1 for bare gig / tender orders).
-   *   - When the transition is allowed, revisionsUsed is incremented and
-   *     the buyer's revisionNote is persisted for the seller to read.
-   *   - The seller resets the flow by re-delivering (revision_requested → delivered).
-   *
-   * opts.revisionNote is only consumed when newStatus === 'revision_requested'.
+   * S2-2: 'revision_requested' transition is gated on revisionsUsed < revisionsAllowed.
+   *       When allowed: revisionsUsed is incremented and revisionNote is persisted.
+   *       Seller resets the flow by re-delivering (revision_requested → delivered).
    */
   async updateStatus(
     userId: number,
@@ -288,7 +335,7 @@ export class OrdersService {
       );
     }
 
-    // S2-2: Revision limit guard — checked before any DB write
+    // S2-2: Revision limit guard
     if (newStatus === 'revision_requested') {
       if (order.revisionsUsed >= order.revisionsAllowed) {
         throw new BadRequestException(
@@ -298,25 +345,14 @@ export class OrdersService {
       }
     }
 
-    // Escrow side-effects
-    if (newStatus === 'delivered') {
-      await this.escrow.markDelivered(orderId);
-    }
-    if (newStatus === 'completed') {
-      await this.escrow.releaseEscrow(orderId, userId);
-    }
-    if (newStatus === 'disputed') {
-      // Legacy path: use POST /orders/:id/dispute for structured dispute filing (S1-4).
-      await this.escrow.openDispute(orderId, userId);
-    }
+    if (newStatus === 'delivered') await this.escrow.markDelivered(orderId);
+    if (newStatus === 'completed') await this.escrow.releaseEscrow(orderId, userId);
+    if (newStatus === 'disputed') await this.escrow.openDispute(orderId, userId);
 
-    // Build update payload
     const updateData: Prisma.OrderUpdateInput = { status: newStatus as any };
     if (newStatus === 'revision_requested') {
       updateData.revisionsUsed = { increment: 1 };
-      if (opts?.revisionNote) {
-        updateData.revisionNote = opts.revisionNote.trim();
-      }
+      if (opts?.revisionNote) updateData.revisionNote = opts.revisionNote.trim();
     }
 
     const updated = await this.prisma.order.update({
@@ -345,19 +381,6 @@ export class OrdersService {
 
   /**
    * S1-4: Structured Dispute Filing
-   *
-   * Creates a Dispute record in the database (so admin can track and resolve it)
-   * and transitions the order to 'disputed' state via EscrowService.openDispute().
-   *
-   * This is the correct, structured way to open a dispute.  The legacy
-   * updateStatus(..., 'disputed') path still exists for backward compatibility
-   * but does NOT create a Dispute row — use this endpoint instead.
-   *
-   * Validations:
-   *   - Caller must be buyer or seller of the order.
-   *   - Order must be in 'active', 'delivered', or 'revision_requested' state.
-   *   - Only one Dispute row is allowed per order (DB @unique on orderId).
-   *   - reason must be non-empty.
    */
   async fileDispute(userId: number, orderId: number, reason: string) {
     if (!reason || reason.trim().length === 0) {
@@ -366,7 +389,6 @@ export class OrdersService {
 
     const order = await this.prisma.order.findUnique({ where: { id: orderId } });
     if (!order) throw new NotFoundException('Order not found');
-
     if (order.buyerId !== userId && order.sellerId !== userId) {
       throw new ForbiddenException('Access denied');
     }
@@ -380,17 +402,10 @@ export class OrdersService {
     }
 
     const existing = await this.prisma.dispute.findUnique({ where: { orderId } });
-    if (existing) {
-      throw new ConflictException('A dispute already exists for this order');
-    }
+    if (existing) throw new ConflictException('A dispute already exists for this order');
 
     const dispute = await this.prisma.dispute.create({
-      data: {
-        orderId,
-        initiatorId: userId,
-        reason: reason.trim(),
-        status: 'open',
-      },
+      data: { orderId, initiatorId: userId, reason: reason.trim(), status: 'open' },
     });
 
     await this.escrow.openDispute(orderId, userId);
@@ -405,15 +420,8 @@ export class OrdersService {
     return { dispute };
   }
 
-  // ─── State machine ────────────────────────────────────────────────────────
+  // ─── State machine ─────────────────────────────────────────────────────
 
-  /**
-   * Returns the list of statuses the current user is allowed to transition
-   * this order into, given its current status and the user's role.
-   *
-   * S2-2: 'revision_requested' added as a buyer transition from 'delivered'.
-   *        Revision limit is enforced separately in updateStatus().
-   */
   private getAllowedTransitions(
     status: OrderStatus,
     userId: number,
@@ -426,19 +434,17 @@ export class OrdersService {
       case 'active':
         return userId === sellerId ? ['delivered'] : [];
       case 'delivered':
-        // Buyer: accept → complete | request revision | escalate → dispute
         return userId === buyerId ? ['completed', 'revision_requested', 'disputed'] : [];
       case 'revision_requested' as any:
-        // Seller: re-delivers after completing the requested revisions
         return userId === sellerId ? ['delivered'] : [];
       case 'disputed':
-        return []; // Admin resolves via PATCH /admin/disputes/:id
+        return [];
       default:
         return [];
     }
   }
 
-  // ─── Serialization ────────────────────────────────────────────────────────
+  // ─── Serialization ──────────────────────────────────────────────────────
 
   private mapOrder(order: any) {
     return {
