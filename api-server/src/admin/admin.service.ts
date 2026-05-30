@@ -463,7 +463,10 @@ export class AdminService {
         throw new BadRequestException('platformFeePercent must be an integer between 0 and 100');
       }
     } else if (trimmedKey.endsWith('Nano')) {
-      const n = BigInt(trimmedValue);
+      let n: bigint;
+      try { n = BigInt(trimmedValue); } catch {
+        throw new BadRequestException(`${trimmedKey} must be a valid integer string`);
+      }
       if (n < 0n) throw new BadRequestException(`${trimmedKey} must be a non-negative integer`);
     } else if (trimmedKey === 'maintenanceMode') {
       if (trimmedValue !== 'true' && trimmedValue !== 'false') {

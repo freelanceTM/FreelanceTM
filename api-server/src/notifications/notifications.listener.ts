@@ -11,6 +11,9 @@ import {
   DisputeResolvedEvent,
   KycStatusChangedEvent,
   ReviewApprovedEvent,
+  MessageReceivedEvent,
+  PaymentApprovedEvent,
+  PaymentRejectedEvent,
 } from '../events/notification.events';
 
 /**
@@ -284,6 +287,51 @@ export class NotificationsListener {
         ? 'Ваша личность подтверждена. На профиле появился значок верификации.'
         : 'К сожалению, верификация не пройдена. Обратитесь в поддержку для уточнения причин.',
       { userId: payload.userId },
+    );
+  }
+
+  /**
+   * New chat message — notify the recipient in the in-app notification center.
+   * (The push channel is handled by TelegramService; this provides the badge counter.)
+   */
+  @OnEvent(EVENTS.MESSAGE_RECEIVED)
+  async onMessageReceived(payload: MessageReceivedEvent): Promise<void> {
+    await this.notify(
+      payload.recipientId,
+      'message_received',
+      '💬 Новое сообщение',
+      `${payload.senderName}: ${payload.content.slice(0, 80)}${payload.content.length > 80 ? '…' : ''}`,
+      { orderId: payload.orderId, messageId: payload.messageId },
+    );
+  }
+
+  /**
+   * Admin approved a fiat payment — user's wallet has been credited.
+   */
+  @OnEvent(EVENTS.PAYMENT_APPROVED)
+  async onPaymentApproved(payload: PaymentApprovedEvent): Promise<void> {
+    await this.notify(
+      payload.userId,
+      'payment_approved',
+      '✅ Платёж принят',
+      `Ваш платёж на ${payload.amountManat} TMT одобрен — средства зачислены на кошелёк.`,
+      { paymentId: payload.paymentId },
+    );
+  }
+
+  /**
+   * Admin rejected a fiat payment — user should try again or contact support.
+   */
+  @OnEvent(EVENTS.PAYMENT_REJECTED)
+  async onPaymentRejected(payload: PaymentRejectedEvent): Promise<void> {
+    await this.notify(
+      payload.userId,
+      'payment_rejected',
+      '❌ Платёж отклонён',
+      payload.reason
+        ? `Платёж на ${payload.amountManat} TMT отклонён: ${payload.reason}`
+        : `Платёж на ${payload.amountManat} TMT отклонён. Обратитесь в поддержку.`,
+      { paymentId: payload.paymentId },
     );
   }
 }
