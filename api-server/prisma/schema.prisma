@@ -41,6 +41,7 @@ enum OrderStatus {
   pending
   active
   delivered
+  revision_requested  // S2-2: buyer requests another iteration before accepting
   completed
   cancelled
   disputed
@@ -295,7 +296,8 @@ model GigExtra {
   orderIndex  Int      @default(0)
   createdAt   DateTime @default(now())
 
-  gig Gig @relation(fields: [gigId], references: [id], onDelete: Cascade)
+  gig        Gig         @relation(fields: [gigId], references: [id], onDelete: Cascade)
+  orderItems OrderItem[]  // back-relation required by Prisma for OrderItem.extra
 
   @@map("gig_extras")
 }
@@ -312,7 +314,8 @@ model GigPackage {
   isActive     Boolean  @default(true)
   createdAt    DateTime @default(now())
 
-  gig Gig @relation(fields: [gigId], references: [id], onDelete: Cascade)
+  gig    Gig     @relation(fields: [gigId], references: [id], onDelete: Cascade)
+  orders Order[]  // back-relation required by Prisma for Order.package
 
   @@map("gig_packages")
 }
@@ -329,6 +332,9 @@ model Order {
   quantity          Int         @default(1)
   requirements      String?     @db.Text
   deliveryDays      Int         @default(3)
+  revisionsUsed     Int         @default(0)   // S2-2: incremented each time buyer requests a revision
+  revisionsAllowed  Int         @default(1)   // S2-2: set at creation from package.revisions or gig.revisions
+  revisionNote      String?     @db.Text      // S2-2: buyer's note on the latest revision request
   escrowAddress     String?
   tonTransactionHash String?
   completedAt       DateTime?
