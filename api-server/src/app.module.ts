@@ -28,6 +28,7 @@ import { WebhooksModule } from './webhooks/webhooks.module';
 import { StorageModule } from './storage/storage.module';
 import { TonModule } from './ton/ton.module';
 import { LegalModule } from './legal/legal.module';
+import { ReviewsModule } from './reviews/reviews.module';
 import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
 
 @Module({
@@ -88,6 +89,7 @@ import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
     StorageModule,
     TonModule,
     LegalModule,
+    ReviewsModule,
   ],
   providers: [
     {

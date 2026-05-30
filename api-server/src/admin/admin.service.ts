@@ -57,10 +57,18 @@ export class AdminService {
     const review = await this.prisma.review.findUnique({ where: { id: reviewId } });
     if (!review) throw new NotFoundException('Review not found');
 
-    return this.prisma.review.update({
+    const updated = await this.prisma.review.update({
       where: { id: reviewId },
       data: { status: decision === 'approve' ? 'approved' : 'rejected' },
     });
+
+    // S1-2: Trigger rating recalculation only after approval.
+    // ReviewsService listens for this event via @OnEvent('review.approved').
+    if (decision === 'approve') {
+      this.eventEmitter.emit(EVENTS.REVIEW_APPROVED, { reviewId });
+    }
+
+    return updated;
   }
 
   // USER MANAGEMENT

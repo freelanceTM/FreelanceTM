@@ -572,7 +572,7 @@ model Dispute {
 model Review {
   id          Int          @id @default(autoincrement())
   orderId     Int          @unique
-  gigId       Int
+  gigId       Int?         // null for tender-originated orders (S1-2)
   authorId    Int
   targetId    Int
   rating      Int
@@ -580,10 +580,10 @@ model Review {
   status      ReviewStatus @default(pending)
   createdAt   DateTime     @default(now())
 
-  order  Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  gig    Gig   @relation(fields: [gigId], references: [id], onDelete: Cascade)
-  author User  @relation("ReviewAuthor", fields: [authorId], references: [id], onDelete: Cascade)
-  target User  @relation("ReviewTarget", fields: [targetId], references: [id], onDelete: Cascade)
+  order  Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  gig    Gig?   @relation(fields: [gigId], references: [id], onDelete: Cascade)
+  author User   @relation("ReviewAuthor", fields: [authorId], references: [id], onDelete: Cascade)
+  target User   @relation("ReviewTarget", fields: [targetId], references: [id], onDelete: Cascade)
 
   @@map("reviews")
 }

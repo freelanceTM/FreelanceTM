@@ -11,6 +11,7 @@ export const EVENTS = {
   DISPUTE_OPENED: 'dispute.opened',
   DISPUTE_RESOLVED: 'dispute.resolved',
   KYC_STATUS_CHANGED: 'kyc.status_changed',
+  REVIEW_APPROVED: 'review.approved',
 } as const;
 
 export interface OrderCreatedEvent {
@@ -82,4 +83,12 @@ export interface DisputeResolvedEvent {
 export interface KycStatusChangedEvent {
   userId: number;
   status: 'approved' | 'rejected';
+}
+
+/**
+ * S1-2: Emitted by AdminService.moderateReview() after a review is approved.
+ * ReviewsService listens for this event to trigger rating recalculation.
+ */
+export interface ReviewApprovedEvent {
+  reviewId: number;
 }
