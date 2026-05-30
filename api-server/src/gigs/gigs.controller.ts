@@ -9,6 +9,8 @@ import {
   Query,
   ParseIntPipe,
   UseGuards,
+  HttpCode,
+  HttpStatus,
 } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation, ApiQuery } from '@nestjs/swagger';
 import { GigsService } from './gigs.service';
@@ -26,6 +28,8 @@ class CreateGigDto {
   status?: 'draft' | 'active' | 'paused';
   tags?: string[];
   images?: string[];
+  extras?: Array<{ title: string; description?: string; price: number; deliveryDays?: number }>;
+  packages?: Array<{ name: string; description?: string; price: number; deliveryDays?: number; revisions?: number; includes?: string[] }>;
 }
 
 @ApiTags('Gigs')
@@ -36,21 +40,34 @@ export class GigsController {
   @Post()
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth('jwt')
-  @ApiOperation({ summary: 'Create a gig' })
+  @ApiOperation({
+    summary: 'Create a gig',
+    description:
+      'S3-1: Enforces subscription tier gig limits.\n' +
+      '  free → max 3 | pro → max 20 | business → unlimited\n' +
+      'Throws 403 if the seller has reached their plan limit.',
+  })
   async create(@CurrentUser('sub') userId: number, @Body() dto: CreateGigDto) {
     return this.gigsService.create(userId, dto as unknown as Prisma.GigCreateInput & { categoryId: number });
   }
 
   @Get()
-  @ApiOperation({ summary: 'List gigs' })
+  @ApiOperation({
+    summary: 'List / search gigs',
+    description:
+      'S3-3: Default sortBy is "rank" — weighted formula: isPromoted (×1000) + ' +
+      'seller level (pro=400/top=300/rising=200/new=100) + rating×100.\n' +
+      'When "search" is provided, uses full-text GIN search (ts_rank order).\n' +
+      'Other sortBy: price_asc | price_desc | rating | orders | newest',
+  })
   @ApiQuery({ name: 'page', required: false })
   @ApiQuery({ name: 'limit', required: false })
   @ApiQuery({ name: 'categoryId', required: false })
   @ApiQuery({ name: 'sellerId', required: false })
-  @ApiQuery({ name: 'search', required: false })
+  @ApiQuery({ name: 'search', required: false, description: 'Full-text GIN search' })
   @ApiQuery({ name: 'minPrice', required: false })
   @ApiQuery({ name: 'maxPrice', required: false })
-  @ApiQuery({ name: 'sortBy', required: false, description: 'price_asc|price_desc|rating|orders' })
+  @ApiQuery({ name: 'sortBy', required: false, description: 'rank (default) | price_asc | price_desc | rating | orders | newest' })
   async findAll(
     @Query('page') page?: string,
     @Query('limit') limit?: string,
@@ -88,16 +105,59 @@ export class GigsController {
   }
 
   @Get(':id')
-  @ApiOperation({ summary: 'Get gig by ID' })
+  @ApiOperation({ summary: 'Get gig by ID — increments view counter (S3-4)' })
   async findOne(@Param('id', ParseIntPipe) id: number) {
     return this.gigsService.findOne(id);
+  }
+
+  /**
+   * S3-2: Pause an active gig.
+   * Transitions: active → paused. Hides gig from all public queries instantly.
+   * In-progress orders are NOT affected. Only the owner may pause.
+   */
+  @Patch(':id/pause')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth('jwt')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Pause an active gig (S3-2)',
+    description:
+      'Transitions: active → paused.\n' +
+      'Paused gigs are hidden from catalog, search, and featured — immediately.\n' +
+      'In-progress orders continue unaffected. Only the gig owner may call this.',
+  })
+  async pause(@CurrentUser('sub') userId: number, @Param('id', ParseIntPipe) id: number) {
+    return this.gigsService.pause(userId, id);
+  }
+
+  /**
+   * S3-2: Resume a paused gig.
+   * Transitions: paused → active. Re-validates subscription tier limit.
+   */
+  @Patch(':id/resume')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth('jwt')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Resume a paused gig (S3-2)',
+    description:
+      'Transitions: paused → active.\n' +
+      'Re-validates tier limit — throws 403 if current plan would be exceeded ' +
+      '(e.g. subscription expired while gig was paused and free limit is already full).',
+  })
+  async resume(@CurrentUser('sub') userId: number, @Param('id', ParseIntPipe) id: number) {
+    return this.gigsService.resume(userId, id);
   }
 
   @Patch(':id')
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth('jwt')
-  @ApiOperation({ summary: 'Update a gig' })
-  async update(@CurrentUser('sub') userId: number, @Param('id', ParseIntPipe) id: number, @Body() dto: Prisma.GigUpdateInput) {
+  @ApiOperation({ summary: 'Update a gig (title, description, price, tags, images, etc.)' })
+  async update(
+    @CurrentUser('sub') userId: number,
+    @Param('id', ParseIntPipe) id: number,
+    @Body() dto: Prisma.GigUpdateInput,
+  ) {
     return this.gigsService.update(userId, id, dto);
   }
 

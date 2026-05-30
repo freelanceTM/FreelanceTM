@@ -30,6 +30,7 @@ import { TonModule } from './ton/ton.module';
 import { LegalModule } from './legal/legal.module';
 import { ReviewsModule } from './reviews/reviews.module';
 import { LevelsModule } from './levels/levels.module';
+import { SubscriptionsModule } from './subscriptions/subscriptions.module';
 import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
 
 @Module({
@@ -92,6 +93,7 @@ import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
     LegalModule,
     ReviewsModule,
     LevelsModule,
+    SubscriptionsModule,
   ],
   providers: [
     {
