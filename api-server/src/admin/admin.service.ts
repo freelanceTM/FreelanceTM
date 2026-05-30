@@ -36,14 +36,34 @@ export class AdminService {
     const gig = await this.prisma.gig.findUnique({ where: { id: gigId } });
     if (!gig) throw new NotFoundException('Gig not found');
 
-    let status: any = gig.status;
-    if (decision === 'approve') status = 'active';
-    if (decision === 'reject') status = 'draft';
-    if (decision === 'ban') status = 'banned';
+    let newStatus: string = gig.status;
+    if (decision === 'approve') newStatus = 'active';
+    if (decision === 'reject') newStatus = 'draft';
+    if (decision === 'ban') newStatus = 'banned';
 
-    return this.prisma.gig.update({
-      where: { id: gigId },
-      data: { status, ...(reason ? {} : {}) },
+    // Determine whether category.gigCount needs adjustment.
+    // gigCount tracks active gigs only (consistent with pause/resume in GigsService).
+    const wasActive   = gig.status === 'active';
+    const becomesActive = newStatus === 'active';
+    const countDelta =
+      !wasActive && becomesActive ? 1 :  // draft/pending_review → active: +1
+       wasActive && !becomesActive ? -1 : // active → banned/draft:       -1
+       0;                                  // no change in active-ness
+
+    return this.prisma.$transaction(async (tx) => {
+      const updated = await tx.gig.update({
+        where: { id: gigId },
+        data: { status: newStatus },
+      });
+
+      if (countDelta !== 0) {
+        await tx.category.update({
+          where: { id: gig.categoryId },
+          data: { gigCount: { increment: countDelta } },
+        });
+      }
+
+      return updated;
     });
   }
 
