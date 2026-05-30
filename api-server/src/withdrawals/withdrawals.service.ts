@@ -136,54 +136,181 @@ export class WithdrawalsService {
     return req;
   }
 
+  /**
+   * Approves a pending withdrawal and attempts the on-chain transfer.
+   *
+   * M-7 fix — CAS guard on DB status transition:
+   *
+   *  The original code read status='pending' outside a transaction, performed
+   *  the on-chain transfer, and then did a bare `withdrawalRequest.update`.
+   *  Two concurrent admin approvals would both pass the pre-flight check,
+   *  both trigger an on-chain transfer, and both set the status to 'completed'.
+   *
+   *  Fix:
+   *   • The DB status flip uses `updateMany(WHERE status='pending')` as a CAS
+   *     inside a `$transaction` — only one concurrent call can win.
+   *   • The on-chain transfer intentionally stays outside the transaction
+   *     (blockchain is not transactional; we match the pattern in releaseEscrow).
+   *   • If the CAS returns count=0 the status was already moved (another admin
+   *     won the race or it was already processed) — we throw 400 and the
+   *     on-chain transfer that just fired is treated as a duplicate (the caller
+   *     should handle idempotency at the blockchain level via the seqno).
+   */
   async approve(adminId: number, withdrawalId: number, txHash?: string) {
+    // ── 1. Pre-flight — existence check (read-only, outside tx) ─────────────
     const req = await this.prisma.withdrawalRequest.findUnique({ where: { id: withdrawalId } });
     if (!req) throw new NotFoundException('Request not found');
     if (req.status !== 'pending') throw new BadRequestException('Already processed');
 
-    // Try on-chain transfer if configured
+    // ── 2. Best-effort on-chain transfer (outside tx — blockchain is not
+    //       transactional; DB state is the authoritative source of truth) ────
     if (this.ton.isConfigured() && req.destinationType === 'ton_wallet') {
       try {
-        const tx = await this.ton.sendTransaction(req.destination, req.amountNano, `Withdrawal #${withdrawalId}`);
-        txHash = txHash || tx.seqno?.toString();
+        const onChainTx = await this.ton.sendTransaction(
+          req.destination,
+          req.amountNano,
+          `Withdrawal #${withdrawalId}`,
+        );
+        txHash = txHash || onChainTx.seqno?.toString();
       } catch (err: any) {
-        // On-chain failed — keep pending for manual retry
+        // On-chain failed — leave status 'pending' so admin can retry
         throw new BadRequestException(`Blockchain transfer failed: ${err.message}`);
       }
     }
 
-    const updated = await this.prisma.withdrawalRequest.update({
-      where: { id: withdrawalId },
-      data: { status: 'completed', reviewedById: adminId, txHash, reviewedAt: new Date() },
-    });
+    // ── 3. ACID transaction — status flip + ledger update are all-or-nothing ─
+    return this.prisma.$transaction(async (tx) => {
+      // ── 3a. CAS: atomically claim the pending → completed transition ───────
+      //
+      //  Only one concurrent approval can match status='pending'. The second
+      //  concurrent call will find count=0 after the first commits.
+      const cas = await tx.withdrawalRequest.updateMany({
+        where: { id: withdrawalId, status: 'pending' },
+        data: { status: 'completed', reviewedById: adminId, txHash, reviewedAt: new Date() },
+      });
 
-    await this.prisma.transaction.updateMany({
-      where: { userId: req.userId, type: 'withdraw', status: 'pending', metadata: { path: ['withdrawalId'], equals: withdrawalId } },
-      data: { status: 'completed', txHash },
-    });
+      if (cas.count === 0) {
+        this.logger.warn(
+          `[CAS] approve: withdrawalRequest ${withdrawalId} was no longer 'pending' ` +
+          `when admin ${adminId} attempted approval — possible concurrent approval.`,
+        );
+        throw new BadRequestException(
+          'Withdrawal already processed — it may have been approved by a concurrent request.',
+        );
+      }
 
-    return updated;
+      // ── 3b. Mark the corresponding ledger entry as completed ──────────────
+      await tx.transaction.updateMany({
+        where: {
+          userId: req.userId,
+          type: 'withdraw',
+          status: 'pending',
+          metadata: { path: ['withdrawalId'], equals: withdrawalId },
+        },
+        data: { status: 'completed', txHash },
+      });
+
+      return tx.withdrawalRequest.findUnique({ where: { id: withdrawalId } });
+    });
   }
 
+  /**
+   * Rejects a pending withdrawal and refunds the deducted balance to the user.
+   *
+   * M-7 fix — idempotent balance credit via CAS + $transaction:
+   *
+   *  The original code was three sequential bare DB calls (no transaction,
+   *  no CAS):
+   *    1. findUnique → check status='pending'
+   *    2. wallet.update({ increment: amountNano })   ← balance credited
+   *    3. transaction.updateMany(...)
+   *    4. withdrawalRequest.update({ status:'rejected' })
+   *
+   *  TOCTOU race under two concurrent admin double-clicks:
+   *    • Both requests read status='pending' before either commits.
+   *    • Both execute step 2 — wallet credited TWICE.
+   *    • Both execute steps 3 and 4 — the second one silently overwrites
+   *      the first (harmless for status, but the balance was already doubled).
+   *
+   *  Fix — same CAS + $transaction pattern as refundEscrow (H-4):
+   *
+   *    Step A  (inside tx): updateMany(WHERE id=X AND status='pending')
+   *                         → atomically moves status to 'rejected'
+   *                         → count=0 means someone else already won the race
+   *    Step B  (inside tx): wallet.update({ increment: amountNano })
+   *                         → only reachable if step A returned count=1
+   *                         → PostgreSQL row lock ensures one tx at a time
+   *
+   *  Under PostgreSQL read-committed (Prisma's default):
+   *    • Request A enters tx, acquires row lock on the WithdrawalRequest row,
+   *      updateMany matches count=1 → proceeds to credit wallet → commits.
+   *    • Request B waits for A's lock; after A commits the status is 'rejected'
+   *      → updateMany matches 0 rows → throws → full rollback (wallet untouched).
+   *
+   *  Result: exactly one balance credit per rejection, regardless of how many
+   *  concurrent admin calls arrive.
+   */
   async reject(adminId: number, withdrawalId: number, note?: string) {
-    const req = await this.prisma.withdrawalRequest.findUnique({ where: { id: withdrawalId } });
-    if (!req) throw new NotFoundException('Request not found');
-    if (req.status !== 'pending') throw new BadRequestException('Already processed');
+    return this.prisma.$transaction(async (tx) => {
+      // ── Step A: CAS — atomically claim the pending → rejected transition ───
+      //
+      //  This is the idempotency gate. updateMany holds a row-level exclusive
+      //  lock during the UPDATE. Only one concurrent transaction can match
+      //  status='pending' — the loser gets count=0 and is rejected cleanly.
+      const cas = await tx.withdrawalRequest.updateMany({
+        where: { id: withdrawalId, status: 'pending' },
+        data: {
+          status: 'rejected',
+          reviewedById: adminId,
+          reviewedAt: new Date(),
+          note,
+        },
+      });
 
-    // Refund balance
-    await this.prisma.wallet.update({
-      where: { userId: req.userId },
-      data: { balanceNano: { increment: req.amountNano } },
-    });
+      if (cas.count === 0) {
+        // Either the record doesn't exist or it was already processed.
+        // Distinguish the two cases for a clear error message.
+        const existing = await tx.withdrawalRequest.findUnique({ where: { id: withdrawalId } });
+        if (!existing) throw new NotFoundException('Withdrawal request not found');
+        this.logger.warn(
+          `[CAS] reject: withdrawalRequest ${withdrawalId} was already in ` +
+          `status '${existing.status}' when admin ${adminId} attempted rejection.`,
+        );
+        throw new BadRequestException(
+          `Cannot reject withdrawal — it is already in '${existing.status}' state. ` +
+          `Possible concurrent rejection by another admin.`,
+        );
+      }
 
-    await this.prisma.transaction.updateMany({
-      where: { userId: req.userId, type: 'withdraw', status: 'pending', metadata: { path: ['withdrawalId'], equals: withdrawalId } },
-      data: { status: 'failed' },
-    });
+      // ── Step B: Fetch the updated record to read userId and amountNano ─────
+      const req = await tx.withdrawalRequest.findUniqueOrThrow({ where: { id: withdrawalId } });
 
-    return this.prisma.withdrawalRequest.update({
-      where: { id: withdrawalId },
-      data: { status: 'rejected', reviewedById: adminId, reviewedAt: new Date(), note },
+      // ── Step C: Credit the user's balance — only reachable if we won the CAS
+      //
+      //  wallet.update throws NotFoundException if the wallet was deleted between
+      //  the CAS and here — the transaction rolls back cleanly (safe failure).
+      await tx.wallet.update({
+        where: { userId: req.userId },
+        data: { balanceNano: { increment: req.amountNano } },
+      });
+
+      // ── Step D: Mark the corresponding ledger entry as failed (refunded) ───
+      await tx.transaction.updateMany({
+        where: {
+          userId: req.userId,
+          type: 'withdraw',
+          status: 'pending',
+          metadata: { path: ['withdrawalId'], equals: withdrawalId },
+        },
+        data: { status: 'failed' },
+      });
+
+      this.logger.log(
+        `[WITHDRAWAL] Rejected — id ${withdrawalId}, user ${req.userId}, ` +
+        `refunded ${req.amountNano} nano, admin ${adminId}`,
+      );
+
+      return req;
     });
   }
 
