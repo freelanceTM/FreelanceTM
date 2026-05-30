@@ -291,9 +291,12 @@ export class AdminService {
       }
     } else if (resolution === 'seller_wins') {
       try {
-        // Pass the buyer's ID to satisfy the ownership check inside releaseEscrow.
-        // The admin is acting on behalf of the buyer by overriding the dispute.
-        await this.escrowService.releaseEscrow(dispute.orderId, dispute.order.buyerId);
+        // Use adminReleaseEscrow — NOT the regular releaseEscrow.
+        // releaseEscrow() pre-flight rejects any order not in 'delivered' state
+        // and its CAS also checks WHERE status = 'delivered'. Disputed orders
+        // are in 'disputed' state, so releaseEscrow always throws for them.
+        // adminReleaseEscrow() accepts both 'delivered' and 'disputed' states.
+        await this.escrowService.adminReleaseEscrow(dispute.orderId, adminUserId);
       } catch (err: any) {
         this.logger.error(
           `[DISPUTE ${disputeId}] seller_wins escrow release failed: ${err.message}`,

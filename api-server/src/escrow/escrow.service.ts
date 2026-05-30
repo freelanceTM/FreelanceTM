@@ -342,6 +342,140 @@ export class EscrowService {
   }
 
   /**
+   * Sprint 6 — Admin-initiated escrow release (dispute ruled for seller).
+   *
+   * Mirrors releaseEscrow() exactly, with two differences:
+   *   1. No buyer ownership check — the admin is acting on behalf of the buyer
+   *      after overriding the normal buyer-confirm flow via dispute resolution.
+   *   2. CAS accepts both 'delivered' AND 'disputed' order states — a disputed
+   *      order is NOT in 'delivered' state, so the normal releaseEscrow() CAS
+   *      would always fail (count=0) for disputed orders.
+   *
+   * Atomicity / concurrency guarantees are identical to releaseEscrow():
+   *   • Single $transaction boundary for all four DB writes.
+   *   • CAS guards against double-release: only one concurrent call can flip
+   *     the order from (delivered|disputed) → completed.
+   *
+   * Called by AdminService.resolveDispute() when resolution === 'seller_wins'.
+   */
+  async adminReleaseEscrow(orderId: number, adminId: number) {
+    const order = await this.prisma.order.findUnique({
+      where: { id: orderId },
+      include: {
+        buyer: { include: { wallet: true } },
+        seller: { include: { wallet: true } },
+      },
+    });
+    if (!order) throw new NotFoundException('Order not found');
+
+    if (!['delivered', 'disputed'].includes(order.status)) {
+      throw new BadRequestException(
+        `adminReleaseEscrow: order ${orderId} is in '${order.status}' state — ` +
+        `expected 'delivered' or 'disputed'`,
+      );
+    }
+    if (!order.seller.wallet) {
+      throw new BadRequestException(
+        'Seller does not have a custodial wallet — cannot credit funds',
+      );
+    }
+
+    const feeConfig = await this.prisma.config.findUnique({ where: { key: 'platformFeePercent' } });
+    const feePercent = feeConfig
+      ? Math.max(0, Math.min(100, parseInt(feeConfig.value, 10) || 0))
+      : 20;
+
+    const amountNano = BigInt(new Prisma.Decimal(String(order.totalPrice)).mul('1000000000').floor().toFixed(0));
+    const feeNano    = (amountNano * BigInt(feePercent)) / 100n;
+    const sellerNet  = amountNano - feeNano;
+
+    // Best-effort on-chain release (outside tx — not transactional)
+    if (this.tonContract.isConfigured() && order.escrowAddress && !order.escrowAddress.startsWith('EQ_SIM')) {
+      try {
+        await this.tonContract.resolveDispute(orderId, 1, 10000);
+      } catch (err: any) {
+        this.logger.warn(`adminReleaseEscrow: on-chain release failed for order ${orderId}: ${err.message}`);
+      }
+    }
+
+    const updated = await this.prisma.$transaction(async (tx) => {
+      // CAS: accept 'delivered' OR 'disputed' — covers both normal and dispute paths
+      const cas = await tx.order.updateMany({
+        where: { id: orderId, status: { in: ['delivered', 'disputed'] } },
+        data: { status: 'completed', completedAt: new Date() },
+      });
+      if (cas.count === 0) {
+        const existing = await tx.order.findUnique({ where: { id: orderId } });
+        throw new BadRequestException(
+          `adminReleaseEscrow CAS failed: order ${orderId} is now in '${existing?.status}' state.`,
+        );
+      }
+
+      const updatedOrder = await tx.order.findUnique({
+        where: { id: orderId },
+        include: { buyer: true, seller: true, gig: true },
+      });
+
+      await tx.wallet.update({
+        where: { userId: order.sellerId },
+        data: { balanceNano: { increment: sellerNet } },
+      });
+
+      await tx.transaction.create({
+        data: {
+          userId: order.sellerId,
+          type: 'escrow_release',
+          status: 'completed',
+          amountNano: sellerNet,
+          currency: 'TON',
+          metadata: { orderId, byAdmin: adminId, grossAmountNano: amountNano.toString(), feeNano: feeNano.toString(), feePercent },
+        },
+      });
+
+      if (feeNano > 0n) {
+        await tx.transaction.create({
+          data: {
+            userId: order.sellerId,
+            type: 'fee',
+            status: 'completed',
+            amountNano: feeNano,
+            currency: 'TON',
+            metadata: { orderId, feePercent, byAdmin: adminId, description: 'Platform commission (dispute: seller wins)' },
+          },
+        });
+      }
+
+      await tx.user.update({
+        where: { id: order.sellerId },
+        data: { completedOrders: { increment: 1 } },
+      });
+
+      await tx.tonEvent.create({
+        data: {
+          contractAddress: order.escrowAddress,
+          eventType: TonEventType.escrow_confirmed,
+          payload: { orderId, byAdmin: adminId, resolution: 'seller_wins' },
+        },
+      });
+
+      return updatedOrder;
+    });
+
+    this.eventEmitter.emit(EVENTS.ESCROW_RELEASED, {
+      orderId,
+      sellerId: order.sellerId,
+      amountNano: sellerNet.toString(),
+    } as EscrowReleasedEvent);
+
+    this.logger.log(
+      `[ESCROW][ADMIN] Released (seller_wins) — order ${orderId}, seller ${order.sellerId}, ` +
+      `net ${sellerNet} nano, admin ${adminId}`,
+    );
+
+    return this.mapOrder(updated);
+  }
+
+  /**
    * Refunds escrowed funds to the buyer (admin-initiated, e.g. dispute ruled for buyer).
    *
    * H-4 fix — three root causes addressed:
