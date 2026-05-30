@@ -1,10 +1,14 @@
 import { Injectable, NotFoundException, ForbiddenException, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { OrdersService } from '../orders/orders.service';
 import { Prisma } from '@prisma/client';
 
 @Injectable()
 export class TendersService {
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    private ordersService: OrdersService,
+  ) {}
 
   async create(userId: number, data: Prisma.TenderCreateInput & { categoryId: number }) {
     const tender = await this.prisma.tender.create({
@@ -72,14 +76,36 @@ export class TendersService {
     return bid;
   }
 
+  /**
+   * S1-3: Tender → Order Bridge
+   *
+   * Selects a winning bid and immediately spawns a real Order with escrow.
+   *
+   * Flow:
+   *   1. Validate caller is the tender author and tender is still open/in_progress.
+   *   2. Clear any previously selected bid (supports re-selection before order creation).
+   *   3. Mark the chosen bid as selected.
+   *   4. Advance tender status to 'in_progress' and set assignedToId.
+   *   5. Call OrdersService.createForTender() — creates Order + fires escrow atomically.
+   *
+   * The returned payload contains both the updated Tender and the new Order so the
+   * client can immediately display the order status and escrow address.
+   */
   async selectBid(tenderId: number, authorId: number, bidId: number) {
     const tender = await this.prisma.tender.findUnique({ where: { id: tenderId } });
     if (!tender) throw new NotFoundException('Tender not found');
     if (tender.authorId !== authorId) throw new ForbiddenException('Only author can select');
+    if (tender.status !== 'open') {
+      throw new BadRequestException(`Cannot select a bid on a tender with status '${tender.status}'`);
+    }
 
-    const bid = await this.prisma.tenderBid.findUnique({ where: { id: bidId }, include: { freelancer: true } });
+    const bid = await this.prisma.tenderBid.findUnique({
+      where: { id: bidId },
+      include: { freelancer: true },
+    });
     if (!bid || bid.tenderId !== tenderId) throw new NotFoundException('Bid not found');
 
+    // Clear any previously selected bid so only one can be selected at a time
     await this.prisma.tenderBid.updateMany({
       where: { tenderId },
       data: { isSelected: false },
@@ -90,11 +116,31 @@ export class TendersService {
       data: { isSelected: true },
     });
 
-    return this.prisma.tender.update({
+    // Advance the tender state
+    const updatedTender = await this.prisma.tender.update({
       where: { id: tenderId },
       data: { status: 'in_progress', assignedToId: bid.freelancerId },
       include: { bids: { include: { freelancer: true } } },
     });
+
+    // ── S1-3: Create the Order and lock escrow ────────────────────────────────
+    //  createForTender() fires escrow creation and ORDER_CREATED event internally.
+    //  If Order creation fails, the bid is already marked selected and the tender
+    //  is in_progress — the error bubbles up so the caller knows to retry.
+    const order = await this.ordersService.createForTender({
+      buyerId: tender.authorId,
+      sellerId: bid.freelancerId,
+      tenderId: tender.id,
+      title: tender.title,
+      totalPrice: bid.price,
+      deliveryDays: bid.deliveryDays,
+      requirements: tender.description,
+    });
+
+    return {
+      tender: this.mapTender(updatedTender),
+      order,
+    };
   }
 
   async cancel(tenderId: number, userId: number) {

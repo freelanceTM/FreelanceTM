@@ -319,7 +319,8 @@ model GigPackage {
 
 model Order {
   id                Int         @id @default(autoincrement())
-  gigId             Int
+  gigId             Int?        // null for tender-originated orders (S1-3)
+  tenderId          Int?        // set when order was created from a tender bid (S1-3)
   buyerId           Int
   sellerId          Int
   packageId         Int?        // если выбран пакет
@@ -335,7 +336,8 @@ model Order {
   createdAt         DateTime    @default(now())
   updatedAt         DateTime    @updatedAt
 
-  gig      Gig       @relation(fields: [gigId], references: [id], onDelete: Restrict)
+  gig      Gig?      @relation(fields: [gigId], references: [id], onDelete: Restrict)
+  tender   Tender?   @relation("TenderOrders", fields: [tenderId], references: [id], onDelete: SetNull)
   buyer    User      @relation("OrderBuyer", fields: [buyerId], references: [id], onDelete: Cascade)
   seller   User      @relation("OrderSeller", fields: [sellerId], references: [id], onDelete: Cascade)
   package  GigPackage? @relation(fields: [packageId], references: [id])
@@ -347,6 +349,7 @@ model Order {
   @@index([buyerId, status])
   @@index([sellerId, status])
   @@index([escrowAddress])
+  @@index([tenderId])
   @@map("orders")
 }
 
@@ -447,6 +450,7 @@ model Tender {
   author     User        @relation("TenderAuthor", fields: [authorId], references: [id], onDelete: Cascade)
   category   Category    @relation(fields: [categoryId], references: [id])
   bids       TenderBid[]
+  orders     Order[]     @relation("TenderOrders")
   assignedTo User?       @relation(fields: [assignedToId], references: [id])
 
   @@map("tenders")

@@ -149,8 +149,16 @@ export class EscrowService {
   /**
    * Releases escrowed funds to the seller after the buyer confirms delivery.
    *
+   * S1-1 Platform Fee Engine:
+   *   On each release, the platform deducts a configurable commission before
+   *   crediting the seller.  The fee percentage is read from the Config table
+   *   (key: 'platformFeePercent', default: 20).  Both the seller net credit
+   *   and the fee are recorded as separate immutable Transaction rows so the
+   *   ledger always balances.  All arithmetic uses BigInt — no floats touch
+   *   money values (M-8 fix preserved).
+   *
    * Double-spend protection (C-3):
-   *   All five DB writes are wrapped in a single Prisma interactive transaction.
+   *   All writes are wrapped in a single Prisma interactive transaction.
    *   The order status transition uses a compare-and-swap (CAS) via `updateMany`
    *   with the expected prior state (`status: 'delivered'`) in the WHERE clause.
    *
@@ -159,7 +167,7 @@ export class EscrowService {
    *     • Request A enters the tx, gets the lock → WHERE matches → count=1 → commits.
    *     • Request B waits for A's lock; A has committed `status='completed'`,
    *       so B's WHERE finds 0 rows → count=0 → throws → full rollback of all
-   *       five writes (status, wallet credit, ledger record, stats, TON event).
+   *       writes (status, wallet credit, ledger records, stats, TON event).
    *
    *   The blockchain call intentionally lives OUTSIDE the transaction — it is
    *   best-effort and non-transactional by nature. The EventEmitter notification
@@ -190,8 +198,24 @@ export class EscrowService {
       );
     }
 
+    // ── S1-1: Read platform fee config (outside tx — read-only) ─────────────
+    //  Key 'platformFeePercent' in Config table; defaults to 20 if absent.
+    //  Value is clamped to [0, 100] to guard against misconfiguration.
+    const feeConfig = await this.prisma.config.findUnique({
+      where: { key: 'platformFeePercent' },
+    });
+    const feePercent = feeConfig
+      ? Math.max(0, Math.min(100, parseInt(feeConfig.value, 10) || 0))
+      : 20;
+
     // M-8 fix: bypass IEEE 754 float entirely — use Decimal string arithmetic
     const amountNano = BigInt(new Prisma.Decimal(String(order.totalPrice)).mul('1000000000').floor().toFixed(0));
+
+    // S1-1: Compute fee and seller net using pure BigInt arithmetic — no floats
+    //  feeNano uses integer division (truncates toward zero), which is the
+    //  standard for financial fee calculations (platform always gets the floor).
+    const feeNano = (amountNano * BigInt(feePercent)) / 100n;
+    const sellerNet = amountNano - feeNano;
 
     // ── 2. Best-effort on-chain release (outside tx — blockchain is not
     //       transactional; DB state is the source of truth) ─────────────────
@@ -210,7 +234,7 @@ export class EscrowService {
       }
     }
 
-    // ── 3. ACID transaction — all five writes share one boundary ─────────────
+    // ── 3. ACID transaction — all writes share one boundary ──────────────────
     const updated = await this.prisma.$transaction(async (tx) => {
       // ── 3a. Compare-and-swap: delivered → completed ──────────────────────
       //
@@ -238,31 +262,58 @@ export class EscrowService {
         include: { buyer: true, seller: true, gig: true },
       });
 
-      // ── 3c. Credit seller's custodial wallet balance ──────────────────────
+      // ── 3c. Credit seller's net amount (gross minus platform fee) ─────────
+      //  S1-1: seller receives sellerNet, not the full amountNano
       await tx.wallet.update({
         where: { userId: order.sellerId },
-        data: { balanceNano: { increment: amountNano } },
+        data: { balanceNano: { increment: sellerNet } },
       });
 
-      // ── 3d. Immutable accounting ledger entry ─────────────────────────────
+      // ── 3d. Immutable escrow_release ledger entry (seller net) ────────────
       await tx.transaction.create({
         data: {
           userId: order.sellerId,
           type: 'escrow_release',
           status: 'completed',
-          amountNano,
+          amountNano: sellerNet,
           currency: 'TON',
-          metadata: { orderId, escrowAddress: order.escrowAddress },
+          metadata: {
+            orderId,
+            escrowAddress: order.escrowAddress,
+            grossAmountNano: amountNano.toString(),
+            feeNano: feeNano.toString(),
+            feePercent,
+          },
         },
       });
 
-      // ── 3e. Seller reputation / stats counter ─────────────────────────────
+      // ── 3e. Platform fee ledger entry (only when fee > 0) ─────────────────
+      //  S1-1: records the platform's commission as a separate 'fee' transaction.
+      //  userId is the seller — the fee is deducted from seller proceeds.
+      if (feeNano > 0n) {
+        await tx.transaction.create({
+          data: {
+            userId: order.sellerId,
+            type: 'fee',
+            status: 'completed',
+            amountNano: feeNano,
+            currency: 'TON',
+            metadata: {
+              orderId,
+              feePercent,
+              description: 'Platform commission',
+            },
+          },
+        });
+      }
+
+      // ── 3f. Seller reputation / stats counter ─────────────────────────────
       await tx.user.update({
         where: { id: order.sellerId },
         data: { completedOrders: { increment: 1 } },
       });
 
-      // ── 3f. TON event log for the indexer ────────────────────────────────
+      // ── 3g. TON event log for the indexer ────────────────────────────────
       await tx.tonEvent.create({
         data: {
           contractAddress: order.escrowAddress,
@@ -278,12 +329,13 @@ export class EscrowService {
     this.eventEmitter.emit(EVENTS.ESCROW_RELEASED, {
       orderId,
       sellerId: order.sellerId,
-      amountNano: amountNano.toString(),
+      amountNano: sellerNet.toString(),
     } as EscrowReleasedEvent);
 
     this.logger.log(
       `[ESCROW] Released — order ${orderId}, seller ${order.sellerId}, ` +
-      `amount ${amountNano} nano, buyer ${userId}`,
+      `gross ${amountNano} nano, fee ${feeNano} nano (${feePercent}%), ` +
+      `net ${sellerNet} nano, buyer ${userId}`,
     );
 
     return this.mapOrder(updated);
@@ -309,6 +361,9 @@ export class EscrowService {
    * Pattern mirrors releaseEscrow (C-3 / H-4): blockchain call stays outside
    * the transaction (best-effort, non-transactional by nature), event emission
    * fires only after a successful DB commit.
+   *
+   * Note: refunds return the FULL escrowed amount to the buyer — no fee is
+   * deducted on refund, because no service was delivered.
    */
   async refundEscrow(orderId: number, adminId: number) {
     // ── 1. Load order + buyer wallet (read-only pre-flight) ──────────────────

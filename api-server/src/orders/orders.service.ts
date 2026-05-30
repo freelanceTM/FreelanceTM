@@ -49,7 +49,77 @@ export class OrdersService {
       orderId: order.id,
       buyerId: order.buyerId,
       sellerId: order.sellerId,
-      gigTitle: order.gig.title,
+      gigTitle: order.gig?.title ?? 'Order',
+      totalPrice: order.totalPrice.toString(),
+    } as OrderCreatedEvent);
+
+    return this.mapOrder(order);
+  }
+
+  /**
+   * S1-3: Tender → Order Bridge
+   *
+   * Creates an Order from a selected TenderBid without requiring a Gig.
+   * Called internally by TendersService.selectBid() immediately after the
+   * buyer selects a winning proposal from the tender exchange.
+   *
+   * Unlike create(), this method:
+   *   - Does NOT check gig status (there is no gig)
+   *   - Sets tenderId for traceability
+   *   - Uses bid.price as totalPrice and bid.deliveryDays as deliveryDays
+   *   - Fires escrow creation synchronously (non-fatal on failure)
+   *   - Emits the same ORDER_CREATED event so notifications work unchanged
+   *
+   * @param params.buyerId      - tender.authorId (the client who posted the tender)
+   * @param params.sellerId     - bid.freelancerId (the freelancer whose bid was chosen)
+   * @param params.tenderId     - the parent Tender.id (for traceability)
+   * @param params.title        - tender.title (used as order label, stored in requirements)
+   * @param params.totalPrice   - bid.price (Prisma Decimal — no float conversion)
+   * @param params.deliveryDays - bid.deliveryDays
+   * @param params.requirements - optional extra context from the tender description
+   */
+  async createForTender(params: {
+    buyerId: number;
+    sellerId: number;
+    tenderId: number;
+    title: string;
+    totalPrice: Prisma.Decimal;
+    deliveryDays: number;
+    requirements?: string;
+  }) {
+    if (params.buyerId === params.sellerId) {
+      throw new BadRequestException('Buyer and seller cannot be the same user');
+    }
+
+    const order = await this.prisma.order.create({
+      data: {
+        gigId: null,
+        tenderId: params.tenderId,
+        buyerId: params.buyerId,
+        sellerId: params.sellerId,
+        totalPrice: params.totalPrice,
+        requirements: params.requirements
+          ? `[Tender: ${params.title}]\n${params.requirements}`
+          : `[Tender: ${params.title}]`,
+        deliveryDays: params.deliveryDays,
+        status: 'pending',
+      },
+      include: { buyer: true, seller: true },
+    });
+
+    // Auto-create escrow — non-fatal on failure (order stays pending and
+    // the buyer can re-trigger escrow creation via the escrow endpoint)
+    try {
+      await this.escrow.createEscrow(order.id);
+    } catch {
+      // intentionally swallowed — same pattern as create()
+    }
+
+    this.eventEmitter.emit(EVENTS.ORDER_CREATED, {
+      orderId: order.id,
+      buyerId: order.buyerId,
+      sellerId: order.sellerId,
+      gigTitle: params.title,
       totalPrice: order.totalPrice.toString(),
     } as OrderCreatedEvent);
 
@@ -123,7 +193,7 @@ export class OrdersService {
     //
     // H-3 fix: the `completedOrders` increment has also been removed from
     // this method.  `releaseEscrow()` owns that counter exclusively at
-    // step 3e of its $transaction.  The previous duplicate increment here
+    // step 3f of its $transaction.  The previous duplicate increment here
     // caused every completed order to inflate the seller's reputation score
     // by 2 instead of 1.
     const updated = await this.prisma.order.update({
@@ -139,7 +209,7 @@ export class OrdersService {
       sellerId: updated.sellerId,
       oldStatus,
       newStatus,
-      gigTitle: updated.gig.title,
+      gigTitle: updated.gig?.title ?? `Order #${orderId}`,
     } as OrderStatusChangedEvent);
 
     return this.mapOrder(updated);
@@ -167,7 +237,7 @@ export class OrdersService {
       createdAt: order.createdAt?.toISOString?.() || order.createdAt,
       updatedAt: order.updatedAt?.toISOString?.() || order.updatedAt,
       completedAt: order.completedAt?.toISOString?.() || order.completedAt,
-      gigTitle: order.gig?.title,
+      gigTitle: order.gig?.title ?? (order.tenderId ? `Tender Order #${order.tenderId}` : undefined),
       buyerUsername: order.buyer?.username,
       sellerUsername: order.seller?.username,
     };
