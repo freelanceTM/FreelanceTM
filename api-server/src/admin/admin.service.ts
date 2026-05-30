@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, ForbiddenException, BadRequestException } from '@nestjs/common';
+import { Injectable, NotFoundException, ForbiddenException, BadRequestException, Logger } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { PrismaService } from '../prisma/prisma.service';
 import { Prisma, PaymentStatus, DisputeResolution, DisputeStatus } from '@prisma/client';
@@ -10,12 +10,16 @@ import {
   DisputeResolvedEvent,
   KycStatusChangedEvent,
 } from '../events/notification.events';
+import { EscrowService } from '../escrow/escrow.service';
 
 @Injectable()
 export class AdminService {
+  private readonly logger = new Logger(AdminService.name);
+
   constructor(
     private prisma: PrismaService,
     private eventEmitter: EventEmitter2,
+    private escrowService: EscrowService,
   ) {}
 
   // GIG MODERATION
@@ -241,15 +245,73 @@ export class AdminService {
       },
     });
 
-    // Update order status based on resolution
-    let orderStatus = 'active';
-    if (resolution === 'buyer_wins') orderStatus = 'cancelled';
-    if (resolution === 'seller_wins') orderStatus = 'completed';
+    // ── S6-1: Dispute Resolution Escrow Integration ──────────────────────────
+    //
+    // Previous bug: resolveDispute only updated order.status and Dispute.status
+    // but NEVER moved any money. The escrow funds stayed locked forever.
+    //
+    // Fix:
+    //   buyer_wins  → refundEscrow(orderId, adminId)
+    //                 Credits the full escrow amount to the buyer's wallet.
+    //                 Sets order.status = 'cancelled' internally via CAS.
+    //
+    //   seller_wins → releaseEscrow(orderId, dispute.order.buyerId)
+    //                 Releases the escrowed amount (minus platform fee) to
+    //                 the seller's wallet. Passing buyerId bypasses the
+    //                 "caller must be the buyer" ownership check — the admin
+    //                 is overriding the normal buyer-confirm flow.
+    //                 Sets order.status = 'completed' internally via CAS.
+    //
+    //   split       → no automatic fund movement; admin handles manually
+    //                 (future: implement split payout in EscrowService).
+    //
+    // Both escrowService methods are fully ACID-safe (atomic CAS +
+    // $transaction), idempotent, and emit the appropriate ESCROW_RELEASED /
+    // ESCROW_REFUNDED events which Telegram notifications and the webhook
+    // dispatcher (S6-2) will pick up automatically.
+    //
+    // Order status is now owned by the escrow CAS — we no longer do a
+    // separate order.update here to avoid double-write conflicts.
 
-    await this.prisma.order.update({
-      where: { id: dispute.orderId },
-      data: { status: orderStatus as any },
-    });
+    if (resolution === 'buyer_wins') {
+      try {
+        await this.escrowService.refundEscrow(dispute.orderId, adminUserId);
+      } catch (err: any) {
+        // Log and continue — the Dispute is still marked resolved so the
+        // admin can see it, and the error is surfaced for manual follow-up.
+        this.logger.error(
+          `[DISPUTE ${disputeId}] buyer_wins escrow refund failed: ${err.message}`,
+          err.stack,
+        );
+        // Fall back: at least cancel the order so it's not stuck in 'disputed'
+        await this.prisma.order.update({
+          where: { id: dispute.orderId },
+          data: { status: 'cancelled' },
+        }).catch(() => {});
+      }
+    } else if (resolution === 'seller_wins') {
+      try {
+        // Pass the buyer's ID to satisfy the ownership check inside releaseEscrow.
+        // The admin is acting on behalf of the buyer by overriding the dispute.
+        await this.escrowService.releaseEscrow(dispute.orderId, dispute.order.buyerId);
+      } catch (err: any) {
+        this.logger.error(
+          `[DISPUTE ${disputeId}] seller_wins escrow release failed: ${err.message}`,
+          err.stack,
+        );
+        // Fall back: mark order completed so it's not stuck in 'disputed'
+        await this.prisma.order.update({
+          where: { id: dispute.orderId },
+          data: { status: 'completed' },
+        }).catch(() => {});
+      }
+    } else {
+      // split or other: no automatic escrow movement, admin resolves manually
+      await this.prisma.order.update({
+        where: { id: dispute.orderId },
+        data: { status: 'cancelled' },
+      });
+    }
 
     this.eventEmitter.emit(EVENTS.DISPUTE_RESOLVED, {
       disputeId,
