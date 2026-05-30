@@ -405,4 +405,56 @@ export class AdminService {
       pendingGigs,
     };
   }
+
+  // ─── Platform Config Management ───────────────────────────────────────────
+
+  /**
+   * Returns all platform config key-value pairs.
+   *
+   * The Config table stores dynamic platform settings that can be changed
+   * without redeployment:
+   *   platformFeePercent  — commission % deducted on escrow release (default 20)
+   *   maintenanceMode     — "true" to put platform in read-only maintenance mode
+   *   maxWithdrawalNano   — per-request withdrawal cap in nanoTON
+   *   minWithdrawalNano   — minimum withdrawal amount in nanoTON
+   *   referralBonusNano   — override referral bonus (default: hard-coded 0.5 TON)
+   */
+  async getConfig() {
+    return this.prisma.config.findMany({ orderBy: { key: 'asc' } });
+  }
+
+  /**
+   * Upserts a platform config value by key.
+   * Creates the row if it doesn't exist; updates `value` if it does.
+   *
+   * Validation:
+   *  - platformFeePercent must parse as integer 0–100
+   *  - Keys with "Nano" suffix must parse as non-negative integers
+   *  - maintenanceMode must be "true" or "false"
+   */
+  async setConfig(key: string, value: string): Promise<object> {
+    const trimmedKey   = key.trim();
+    const trimmedValue = value.trim();
+
+    // Input validation by key
+    if (trimmedKey === 'platformFeePercent') {
+      const n = parseInt(trimmedValue, 10);
+      if (isNaN(n) || n < 0 || n > 100) {
+        throw new BadRequestException('platformFeePercent must be an integer between 0 and 100');
+      }
+    } else if (trimmedKey.endsWith('Nano')) {
+      const n = BigInt(trimmedValue);
+      if (n < 0n) throw new BadRequestException(`${trimmedKey} must be a non-negative integer`);
+    } else if (trimmedKey === 'maintenanceMode') {
+      if (trimmedValue !== 'true' && trimmedValue !== 'false') {
+        throw new BadRequestException('maintenanceMode must be "true" or "false"');
+      }
+    }
+
+    return this.prisma.config.upsert({
+      where: { key: trimmedKey },
+      update: { value: trimmedValue, updatedAt: new Date() },
+      create: { key: trimmedKey, value: trimmedValue },
+    });
+  }
 }

@@ -170,4 +170,49 @@ export class AdminController {
   async verifyUser(@Param('id', ParseIntPipe) id: number, @Body('status') status: 'approved' | 'rejected') {
     return this.adminService.verifyUser(id, status);
   }
+
+  // ─── Platform Config ───────────────────────────────────────────────────────
+
+  /**
+   * GET /admin/config
+   *
+   * Returns all platform config key-value pairs (fee %, maintenance mode, etc.)
+   * Allows the ops team to inspect current settings without needing DB access.
+   */
+  @Get('config')
+  @ApiOperation({
+    summary: 'Get all platform config values (admin)',
+    description:
+      'Returns all Config rows. Key examples:\n' +
+      '  platformFeePercent — escrow commission % (default 20)\n' +
+      '  maintenanceMode    — "true" | "false"\n' +
+      '  maxWithdrawalNano  — per-request cap in nanoTON\n' +
+      '  minWithdrawalNano  — minimum withdrawal in nanoTON',
+  })
+  async getConfig() {
+    return this.adminService.getConfig();
+  }
+
+  /**
+   * PATCH /admin/config/:key
+   *
+   * Upserts a single config value by key.
+   * Critical values (platformFeePercent, maintenance mode) are validated.
+   * Takes effect immediately — no redeployment required.
+   */
+  @Patch('config/:key')
+  @ApiOperation({
+    summary: 'Set a platform config value (admin)',
+    description:
+      'Upserts Config row for the given key. Validates:\n' +
+      '  platformFeePercent → integer 0–100\n' +
+      '  *Nano keys         → non-negative integer\n' +
+      '  maintenanceMode    → "true" | "false"',
+  })
+  async setConfig(
+    @Param('key') key: string,
+    @Body('value') value: string,
+  ) {
+    return this.adminService.setConfig(key, value);
+  }
 }

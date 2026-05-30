@@ -32,6 +32,7 @@ import { ReviewsModule } from './reviews/reviews.module';
 import { LevelsModule } from './levels/levels.module';
 import { SubscriptionsModule } from './subscriptions/subscriptions.module';
 import { ReferralsModule } from './referrals/referrals.module';
+import { CategoriesModule } from './categories/categories.module';
 import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
 
 @Module({
@@ -96,6 +97,7 @@ import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
     LevelsModule,
     SubscriptionsModule,
     ReferralsModule,
+    CategoriesModule,
   ],
   providers: [
     {
