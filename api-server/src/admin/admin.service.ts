@@ -135,7 +135,8 @@ export class AdminService {
       // Re-fetch so we have all fields (needed for amountManat and event)
       const payment = await tx.payment.findUnique({ where: { id: paymentId } });
 
-      const amountNano = BigInt(Math.round(Number(payment!.amountManat) * 1e9));
+      // M-8 fix: bypass IEEE 754 float entirely — use Decimal string arithmetic
+      const amountNano = BigInt(new Prisma.Decimal(String(payment!.amountManat)).mul('1000000000').floor().toFixed(0));
 
       // Create deposit transaction log
       await tx.transaction.create({

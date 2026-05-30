@@ -8,7 +8,7 @@ import {
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { PrismaService } from '../prisma/prisma.service';
 import { TonContractService } from '../ton/ton-contract.service';
-import { TonEventType } from '@prisma/client';
+import { Prisma, TonEventType } from '@prisma/client';
 import {
   EVENTS,
   EscrowReleasedEvent,
@@ -65,7 +65,8 @@ export class EscrowService {
     }
 
     // ── 3. Compute amount ────────────────────────────────────────────────────
-    const amountNano = BigInt(Math.round(Number(order.totalPrice) * 1e9));
+    // M-8 fix: bypass IEEE 754 float entirely — use Decimal string arithmetic
+    const amountNano = BigInt(new Prisma.Decimal(String(order.totalPrice)).mul('1000000000').floor().toFixed(0));
 
     // ── 4. Best-effort on-chain escrow (outside DB tx — blockchain is not
     //       transactional; we proceed even if it fails) ──────────────────────
@@ -189,7 +190,8 @@ export class EscrowService {
       );
     }
 
-    const amountNano = BigInt(Math.round(Number(order.totalPrice) * 1e9));
+    // M-8 fix: bypass IEEE 754 float entirely — use Decimal string arithmetic
+    const amountNano = BigInt(new Prisma.Decimal(String(order.totalPrice)).mul('1000000000').floor().toFixed(0));
 
     // ── 2. Best-effort on-chain release (outside tx — blockchain is not
     //       transactional; DB state is the source of truth) ─────────────────
@@ -322,7 +324,8 @@ export class EscrowService {
       );
     }
 
-    const amountNano = BigInt(Math.round(Number(order.totalPrice) * 1e9));
+    // M-8 fix: bypass IEEE 754 float entirely — use Decimal string arithmetic
+    const amountNano = BigInt(new Prisma.Decimal(String(order.totalPrice)).mul('1000000000').floor().toFixed(0));
 
     // ── 2. Best-effort on-chain refund (outside tx — blockchain is not
     //       transactional; DB state is the source of truth) ─────────────────
