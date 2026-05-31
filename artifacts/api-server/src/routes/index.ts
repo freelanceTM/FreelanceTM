@@ -11,6 +11,7 @@ import adminRouter from "./admin";
 import reviewsRouter from "./reviews";
 import messagesRouter from "./messages";
 import telegramRouter from "./telegram";
+import aiRouter from "./ai";
 
 const router: IRouter = Router();
 
@@ -26,5 +27,6 @@ router.use(adminRouter);
 router.use(reviewsRouter);
 router.use(messagesRouter);
 router.use(telegramRouter);
+router.use(aiRouter);
 
 export default router;

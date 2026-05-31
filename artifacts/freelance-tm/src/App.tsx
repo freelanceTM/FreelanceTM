@@ -20,6 +20,9 @@ import Favorites from "@/pages/favorites";
 import HowItWorks from "@/pages/how-it-works";
 import WalletPage from "@/pages/wallet";
 import AdminPage from "@/pages/admin";
+import Tenders from "@/pages/tenders";
+import TenderDetail from "@/pages/tender-detail";
+import CreateTender from "@/pages/create-tender";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -47,6 +50,9 @@ function Router() {
       <Route path="/how-it-works" component={HowItWorks} />
       <Route path="/wallet" component={WalletPage} />
       <Route path="/admin" component={AdminPage} />
+      <Route path="/tenders" component={Tenders} />
+      <Route path="/tenders/:id" component={TenderDetail} />
+      <Route path="/create-tender" component={CreateTender} />
       <Route component={NotFound} />
     </Switch>
   );

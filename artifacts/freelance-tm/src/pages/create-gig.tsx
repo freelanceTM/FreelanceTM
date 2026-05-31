@@ -11,7 +11,17 @@ import { useEffect, useState } from "react";
 import { useLocation } from "wouter";
 import { useToast } from "@/hooks/use-toast";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Loader2, Eye, EyeOff } from "lucide-react";
+import { Loader2, Eye, EyeOff, Sparkles, Info } from "lucide-react";
+
+async function aiPost<T>(path: string, body: Record<string, unknown>): Promise<T> {
+  const res = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json() as Promise<T>;
+}
 
 export default function CreateGig() {
   const { user, isAuthenticated, isLoading: authLoading } = useAuth();
@@ -31,12 +41,54 @@ export default function CreateGig() {
   const [imageUrl, setImageUrl] = useState("");
   const [status, setStatus] = useState<"active" | "draft">("active");
 
+  // AI state
+  const [aiLoading, setAiLoading] = useState(false);
+  const [priceHint, setPriceHint] = useState<{ min: number; max: number; recommended: number } | null>(null);
+  const [moderating, setModerating] = useState(false);
+
   useEffect(() => {
     if (!authLoading && (!isAuthenticated || user?.role === "client")) {
       toast({ title: "Только фрилансеры могут создавать услуги", variant: "destructive" });
       setLocation("/");
     }
   }, [authLoading, isAuthenticated, user, setLocation, toast]);
+
+  // Fetch price suggestion whenever category changes
+  useEffect(() => {
+    if (!categoryId || !categories) return;
+    const cat = categories.find((c) => c.id.toString() === categoryId);
+    if (!cat) return;
+    setPriceHint(null);
+    aiPost<{ min: number; max: number; recommended: number }>("/api/ai/suggest-price", {
+      category: cat.name,
+      level: (user as Record<string, unknown>)?.level ?? "new",
+    })
+      .then((data) => setPriceHint(data))
+      .catch(() => {});
+  }, [categoryId, categories, user]);
+
+  const handleAiFill = async () => {
+    if (!categoryId || !categories) {
+      toast({ title: "Сначала выберите категорию", variant: "destructive" });
+      return;
+    }
+    const cat = categories.find((c) => c.id.toString() === categoryId);
+    setAiLoading(true);
+    try {
+      const data = await aiPost<{ title: string; description: string; tags: string[] }>(
+        "/api/ai/generate-content",
+        { category: cat?.name, title, description, type: "gig" }
+      );
+      setTitle(data.title);
+      setDescription(data.description);
+      setTagsStr(data.tags.join(", "));
+      toast({ title: "✨ AI заполнил поля — проверьте и отредактируйте" });
+    } catch {
+      toast({ title: "AI недоступен, попробуйте позже", variant: "destructive" });
+    } finally {
+      setAiLoading(false);
+    }
+  };
 
   const createGig = useCreateGig({
     mutation: {
@@ -50,12 +102,33 @@ export default function CreateGig() {
     },
   });
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!title || !description || !price || !deliveryDays || !categoryId) {
       toast({ title: "Заполните все обязательные поля", variant: "destructive" });
       return;
     }
+
+    // Moderation check
+    setModerating(true);
+    try {
+      const mod = await aiPost<{ safe: boolean; reason?: string }>("/api/ai/moderate", {
+        content: `${title}\n\n${description}`,
+      });
+      if (!mod.safe) {
+        toast({
+          title: "Контент нарушает правила платформы",
+          description: mod.reason,
+          variant: "destructive",
+        });
+        return;
+      }
+    } catch {
+      // If moderation fails, proceed (fail-open)
+    } finally {
+      setModerating(false);
+    }
+
     createGig.mutate({
       data: {
         title,
@@ -71,12 +144,31 @@ export default function CreateGig() {
     });
   };
 
+  const isSubmitting = moderating || createGig.isPending;
+
   return (
     <Layout>
       <div className="container mx-auto px-4 py-8 md:py-12 max-w-2xl">
-        <div className="mb-8">
-          <h1 className="text-3xl font-display font-bold mb-2">Создать услугу</h1>
-          <p className="text-muted-foreground">Опишите свои навыки и предложите их рынку Туркменистана</p>
+        <div className="mb-8 flex items-start justify-between gap-4">
+          <div>
+            <h1 className="text-3xl font-display font-bold mb-2">Создать услугу</h1>
+            <p className="text-muted-foreground">Опишите свои навыки и предложите их рынку Туркменистана</p>
+          </div>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="shrink-0 gap-2 border-primary/30 bg-primary/5 hover:bg-primary/10 text-primary mt-1"
+            onClick={handleAiFill}
+            disabled={aiLoading}
+          >
+            {aiLoading ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <Sparkles className="w-4 h-4" />
+            )}
+            AI Заполнить
+          </Button>
         </div>
 
         <Card className="bg-white/5 border-white/10 backdrop-blur-sm">
@@ -125,6 +217,15 @@ export default function CreateGig() {
                     className="bg-background/50 border-white/10"
                     required
                   />
+                  {priceHint && (
+                    <div className="flex items-center gap-1.5 text-xs text-primary/80">
+                      <Info className="w-3 h-3 shrink-0" />
+                      <span>
+                        Рекомендованная цена: <strong>${priceHint.recommended}</strong>
+                        <span className="text-muted-foreground"> (диапазон ${priceHint.min}–${priceHint.max})</span>
+                      </span>
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -246,10 +347,11 @@ export default function CreateGig() {
                 type="submit"
                 size="lg"
                 className="w-full"
-                disabled={createGig.isPending}
+                disabled={isSubmitting}
               >
+                {moderating && <Loader2 className="w-4 h-4 animate-spin mr-2" />}
                 {createGig.isPending && <Loader2 className="w-4 h-4 animate-spin mr-2" />}
-                {status === "draft" ? "Сохранить черновик" : "Опубликовать услугу"}
+                {moderating ? "Проверка контента..." : createGig.isPending ? "Публикуем..." : status === "draft" ? "Сохранить черновик" : "Опубликовать услугу"}
               </Button>
             </form>
           </CardContent>

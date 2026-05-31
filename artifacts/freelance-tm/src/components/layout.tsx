@@ -64,6 +64,12 @@ export function Layout({ children }: { children: ReactNode }) {
                 {t.nav.explore}
               </Link>
               <Link
+                href="/tenders"
+                className={`text-sm font-medium transition-colors hover:text-primary ${location.startsWith("/tenders") ? "text-primary" : "text-muted-foreground"}`}
+              >
+                Тендеры
+              </Link>
+              <Link
                 href="/how-it-works"
                 className={`text-sm font-medium transition-colors hover:text-primary ${location === "/how-it-works" ? "text-primary" : "text-muted-foreground"}`}
               >
