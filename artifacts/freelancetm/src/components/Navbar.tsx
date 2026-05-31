@@ -25,7 +25,9 @@ import { Sheet, SheetContent, SheetTrigger, SheetTitle } from "@/components/ui/s
 
 export function Navbar() {
   const { user, isAuthenticated, logout } = useAuth();
-  const isBuyer = isAuthenticated && user?.role === "buyer";
+  const role = user?.role ?? "";
+  const isBuyer = isAuthenticated && role === "buyer";
+  const isFreelancer = isAuthenticated && (role === "freelancer" || role === "both");
 
   return (
     <header className="sticky top-0 z-50 w-full border-b border-border/40 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
@@ -43,6 +45,15 @@ export function Navbar() {
             <Link href="/tenders" className="hover:text-foreground transition-colors">Exchange</Link>
             {isAuthenticated && (
               <Link href="/orders" className="hover:text-foreground transition-colors">My Orders</Link>
+            )}
+            {isFreelancer && (
+              <Link
+                href="/tenders/my-bids"
+                className="flex items-center gap-1 hover:text-foreground transition-colors"
+              >
+                <FileText className="h-3.5 w-3.5" />
+                My Proposals
+              </Link>
             )}
             {isBuyer && (
               <Link
@@ -98,6 +109,14 @@ export function Navbar() {
                     <span>Orders</span>
                   </Link>
                 </DropdownMenuItem>
+                {isFreelancer && (
+                  <DropdownMenuItem asChild>
+                    <Link href="/tenders/my-bids" className="w-full flex items-center cursor-pointer">
+                      <FileText className="mr-2 h-4 w-4" />
+                      <span>My Proposals</span>
+                    </Link>
+                  </DropdownMenuItem>
+                )}
                 <DropdownMenuItem asChild>
                   <Link href="/profile" className="w-full flex items-center cursor-pointer">
                     <Wallet className="mr-2 h-4 w-4" />
@@ -145,6 +164,11 @@ export function Navbar() {
                   {isAuthenticated ? (
                     <>
                       <Link href="/orders" className="hover:text-primary transition-colors">My Orders</Link>
+                      {isFreelancer && (
+                        <Link href="/tenders/my-bids" className="flex items-center gap-1 hover:text-primary transition-colors">
+                          <FileText className="h-3.5 w-3.5" /> My Proposals
+                        </Link>
+                      )}
                       <Link href="/profile" className="hover:text-primary transition-colors">Profile & Wallet</Link>
                       {isBuyer && (
                         <Link href="/tenders/new" className="text-accent font-semibold hover:text-accent/80 transition-colors flex items-center gap-1">
