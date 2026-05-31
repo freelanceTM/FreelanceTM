@@ -5,7 +5,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { FavoriteButton } from "@/components/favorite-button";
 import { TrustBadge } from "@/components/trust-badge";
 import { useI18n } from "@/lib/i18n";
-import { useGetGig, useListGigReviews, useCreateOrder } from "@workspace/api-client-react";
+import { useGetGig, useListGigReviews, useCreateOrder, useGetUser, getGetUserQueryKey } from "@workspace/api-client-react";
 import { useAuth } from "@/hooks/use-auth";
 import { Clock, Component, MessageSquare, Star, Shield, Zap, RefreshCw } from "lucide-react";
 import { Link, useLocation } from "wouter";
@@ -25,6 +25,11 @@ export default function GigDetail({ params }: { params: { id: string } }) {
 
   const { data: gig, isLoading } = useGetGig(id, { query: { enabled: !!id, queryKey: ["getGig", id] as const } });
   const { data: reviews, isLoading: reviewsLoading } = useListGigReviews(id, { query: { enabled: !!id, queryKey: ["listGigReviews", id] as const } });
+
+  const { data: sellerProfile } = useGetUser(
+    gig?.sellerId ?? 0,
+    { query: { enabled: !!gig?.sellerId, queryKey: getGetUserQueryKey(gig?.sellerId ?? 0) } }
+  );
 
   const [requirements, setRequirements] = useState("");
   const [isOrderOpen, setIsOrderOpen] = useState(false);
@@ -70,6 +75,9 @@ export default function GigDetail({ params }: { params: { id: string } }) {
   }
 
   if (!gig) return <Layout><div className="p-20 text-center text-muted-foreground">Услуга не найдена</div></Layout>;
+
+  const sellerRating = sellerProfile?.rating ?? null;
+  const sellerReviewCount = sellerProfile?.reviewCount ?? 0;
 
   return (
     <Layout>
@@ -200,6 +208,23 @@ export default function GigDetail({ params }: { params: { id: string } }) {
                   <div>
                     <div className="font-semibold">{gig.sellerDisplayName || gig.sellerUsername}</div>
                     <div className="text-xs text-muted-foreground">@{gig.sellerUsername}</div>
+                    {/* Seller overall rating */}
+                    {sellerRating != null && sellerRating > 0 ? (
+                      <div className="flex items-center gap-1 mt-0.5">
+                        {Array(5).fill(0).map((_, i) => (
+                          <Star
+                            key={i}
+                            className={`w-3 h-3 ${i < Math.round(sellerRating) ? "text-yellow-400 fill-current" : "text-white/20"}`}
+                          />
+                        ))}
+                        <span className="text-xs font-bold text-yellow-400 ml-0.5">{sellerRating.toFixed(1)}</span>
+                        <span className="text-xs text-muted-foreground">
+                          ({sellerReviewCount} {sellerReviewCount === 1 ? "отзыв" : "отзывов"})
+                        </span>
+                      </div>
+                    ) : (
+                      <div className="text-xs text-muted-foreground mt-0.5">Новый исполнитель</div>
+                    )}
                   </div>
                 </Link>
                 <TrustBadge
@@ -281,6 +306,19 @@ export default function GigDetail({ params }: { params: { id: string } }) {
                       <span>{t.gigDetail.chat}</span>
                     </div>
                   </div>
+
+                  {/* Seller rating in sidebar */}
+                  {sellerRating != null && sellerRating > 0 && (
+                    <div className="mb-5 p-3 rounded-lg bg-yellow-500/5 border border-yellow-500/20 flex items-center gap-2">
+                      <Star className="w-4 h-4 text-yellow-400 fill-current shrink-0" />
+                      <div className="text-sm">
+                        <span className="font-bold text-yellow-400">{sellerRating.toFixed(1)}</span>
+                        <span className="text-muted-foreground ml-1.5">
+                          рейтинг исполнителя · {sellerReviewCount} {sellerReviewCount === 1 ? "отзыв" : "отзывов"}
+                        </span>
+                      </div>
+                    </div>
+                  )}
 
                   {!isAuthenticated ? (
                     <Link href="/login">

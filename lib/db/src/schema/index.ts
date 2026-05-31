@@ -6,3 +6,4 @@ export * from "./orders";
 export * from "./wallet";
 export * from "./topups";
 export * from "./payouts";
+export * from "./reviews";
