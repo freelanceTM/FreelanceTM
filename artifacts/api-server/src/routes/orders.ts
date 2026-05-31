@@ -2,6 +2,7 @@ import { Router, type IRouter } from "express";
 import { db, ordersTable, usersTable, gigsTable, tendersTable, tenderBidsTable } from "@workspace/db";
 import { eq, and, or } from "drizzle-orm";
 import { extractUser, requireAuth } from "../middleware/auth";
+import { sendTelegramNotification } from "../lib/telegram";
 
 const router: IRouter = Router();
 
@@ -22,8 +23,10 @@ function orderWithDetails(
     isTenderOrder: order.gigId === null,
     buyerId: order.buyerId,
     buyerName: buyer.displayName ?? buyer.username,
+    buyerUsername: buyer.username,
     sellerId: order.sellerId,
     sellerName: seller.displayName ?? seller.username,
+    sellerUsername: seller.username,
     price: order.price,
     status: order.status,
     isDisputed: order.isDisputed,
@@ -31,6 +34,7 @@ function orderWithDetails(
     dueDate: order.dueDate ?? null,
     deliveryNote: order.deliveryNote ?? null,
     createdAt: order.createdAt,
+    totalPrice: order.price,
   };
 }
 
@@ -43,7 +47,38 @@ async function enrichOrder(order: typeof ordersTable.$inferSelect) {
   const tender = order.tenderId
     ? (await db.select().from(tendersTable).where(eq(tendersTable.id, order.tenderId)))[0] ?? null
     : null;
-  return orderWithDetails(order, buyer, seller, gig, tender);
+  return { order: orderWithDetails(order, buyer, seller, gig, tender), buyer, seller };
+}
+
+// Fire Telegram notifications based on status transition
+async function notifyStatusChange(
+  status: string,
+  orderId: number,
+  gigTitle: string,
+  buyer: typeof usersTable.$inferSelect,
+  seller: typeof usersTable.$inferSelect,
+) {
+  const orderLink = `Заказ #${orderId} — <b>${gigTitle}</b>`;
+
+  const buyerMsg: Record<string, string> = {
+    delivered: `📦 Исполнитель сдал работу.\n${orderLink}\nПроверьте результат и подтвердите выполнение.`,
+    cancelled: `❌ Заказ отменён.\n${orderLink}`,
+  };
+  const sellerMsg: Record<string, string> = {
+    active: `✅ Покупатель принял заказ — можно приступать.\n${orderLink}`,
+    revision: `🔄 Покупатель запросил правку.\n${orderLink}\nПосмотрите детали в чате.`,
+    completed: `🎉 Покупатель принял работу! Заказ завершён.\n${orderLink}`,
+    cancelled: `❌ Покупатель отменил заказ.\n${orderLink}`,
+  };
+
+  const notifs: Promise<void>[] = [];
+  if (buyerMsg[status] && buyer.telegramChatId) {
+    notifs.push(sendTelegramNotification(buyer.telegramChatId, buyerMsg[status]));
+  }
+  if (sellerMsg[status] && seller.telegramChatId) {
+    notifs.push(sendTelegramNotification(seller.telegramChatId, sellerMsg[status]));
+  }
+  await Promise.all(notifs);
 }
 
 // ─── LIST ─────────────────────────────────────────────────────────────────────
@@ -65,7 +100,10 @@ router.get("/orders", extractUser, requireAuth, async (req, res): Promise<void> 
     .where(and(...conditions))
     .orderBy(ordersTable.createdAt);
 
-  const result = await Promise.all(orders.map(enrichOrder));
+  const result = await Promise.all(orders.map(async (o) => {
+    const { order } = await enrichOrder(o);
+    return order;
+  }));
   res.json({ items: result });
 });
 
@@ -88,7 +126,8 @@ router.get("/orders/:id", extractUser, requireAuth, async (req, res): Promise<vo
     return;
   }
 
-  res.json(await enrichOrder(order));
+  const { order: enriched } = await enrichOrder(order);
+  res.json(enriched);
 });
 
 // ─── UPDATE STATUS ────────────────────────────────────────────────────────────
@@ -152,12 +191,15 @@ router.patch("/orders/:id/status", extractUser, requireAuth, async (req, res): P
     return;
   }
 
-  res.json(await enrichOrder(updated));
+  const { order: enriched, buyer, seller } = await enrichOrder(updated);
+
+  // Send Telegram notifications (best-effort, non-blocking)
+  notifyStatusChange(status, orderId, enriched.gigTitle, buyer, seller).catch(() => {});
+
+  res.json(enriched);
 });
 
 // ─── OPEN DISPUTE ─────────────────────────────────────────────────────────────
-// Either party (buyer or seller) can flag an active/delivered order as disputed.
-// Does NOT change order.status — admin resolves via PATCH /api/admin/orders/:id/resolve.
 
 router.patch("/orders/:id/dispute", extractUser, requireAuth, async (req, res): Promise<void> => {
   const orderId = parseInt(req.params.id, 10);
@@ -185,7 +227,16 @@ router.patch("/orders/:id/dispute", extractUser, requireAuth, async (req, res): 
     .where(eq(ordersTable.id, orderId))
     .returning();
 
-  res.json(await enrichOrder(updated));
+  const { order: enriched, buyer, seller } = await enrichOrder(updated);
+
+  // Notify both parties about the dispute
+  const disputeMsg = `⚠️ Открыт спор по заказу #${orderId} — <b>${enriched.gigTitle}</b>.\nАдминистратор рассмотрит ситуацию.`;
+  const notifs: Promise<void>[] = [];
+  if (buyer.telegramChatId) notifs.push(sendTelegramNotification(buyer.telegramChatId, disputeMsg));
+  if (seller.telegramChatId) notifs.push(sendTelegramNotification(seller.telegramChatId, disputeMsg));
+  Promise.all(notifs).catch(() => {});
+
+  res.json(enriched);
 });
 
 // ─── CREATE ORDER ─────────────────────────────────────────────────────────────
@@ -229,7 +280,17 @@ router.post('/orders', extractUser, requireAuth, async (req, res): Promise<void>
     })
     .returning();
 
-  res.status(201).json(await enrichOrder(order));
+  const { order: enriched, seller } = await enrichOrder(order);
+
+  // Notify seller about new order
+  if (seller.telegramChatId) {
+    sendTelegramNotification(
+      seller.telegramChatId,
+      `🛒 Новый заказ!\n<b>${gig.title}</b>\nСумма: $${gig.price}\nПроверьте детали и примите заказ.`,
+    ).catch(() => {});
+  }
+
+  res.status(201).json(enriched);
 });
 
 export default router;

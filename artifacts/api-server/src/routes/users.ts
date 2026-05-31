@@ -3,6 +3,7 @@ import { db, usersTable, walletTransactionsTable } from "@workspace/db";
 import { eq, desc } from "drizzle-orm";
 import { UpdateProfileBody } from "@workspace/api-zod";
 import { extractUser, requireAuth } from "../middleware/auth";
+import { createLinkToken, BOT_NAME } from "../lib/telegram";
 
 const router: IRouter = Router();
 
@@ -26,6 +27,7 @@ function userResponse(user: typeof usersTable.$inferSelect) {
     reviewCount: user.reviewCount,
     completedOrders: user.completedOrders,
     memberSince: user.createdAt,
+    telegramLinked: !!user.telegramChatId,
   };
 }
 
@@ -37,7 +39,6 @@ function mapRole(role?: string): "buyer" | "freelancer" | "both" | "admin" {
 }
 
 // ─── REGISTER (passwordless) ─────────────────────────────────────────────────
-// Called by useRegisterUser() hook → POST /api/users/register
 router.post("/users/register", async (req, res): Promise<void> => {
   const { username, email, displayName, role } = req.body as {
     username?: string;
@@ -51,7 +52,6 @@ router.post("/users/register", async (req, res): Promise<void> => {
     return;
   }
 
-  // If user already exists by email, return them (idempotent login)
   const [existing] = await db.select().from(usersTable).where(eq(usersTable.email, email));
   if (existing) {
     const token = makeToken(existing.id);
@@ -110,7 +110,6 @@ router.patch("/users/me", extractUser, requireAuth, async (req, res): Promise<vo
 });
 
 // ─── COMPLETE ONBOARDING ──────────────────────────────────────────────────────
-// Called by useCompleteOnboarding() hook → POST /api/users/me/onboarding
 router.post("/users/me/onboarding", extractUser, requireAuth, async (req, res): Promise<void> => {
   const { role, displayName, bio, skills } = req.body as {
     role?: string;
@@ -168,6 +167,34 @@ router.get("/users/me/wallet", extractUser, requireAuth, async (req, res): Promi
       createdAt: tx.createdAt,
     })),
   });
+});
+
+// ─── TELEGRAM LINK ────────────────────────────────────────────────────────────
+// Generates a one-time deep-link token (15-min TTL) the user sends to the bot.
+// Returns { url: "https://t.me/BOTNAME?start=TOKEN" }
+
+router.get("/users/me/telegram-link", extractUser, requireAuth, async (req, res): Promise<void> => {
+  const userId = req.userId!;
+
+  // Check if already linked
+  const [user] = await db.select().from(usersTable).where(eq(usersTable.id, userId));
+  if (user?.telegramChatId) {
+    res.json({ linked: true, url: null });
+    return;
+  }
+
+  const token = createLinkToken(userId);
+  const url = `https://t.me/${BOT_NAME}?start=${token}`;
+  res.json({ linked: false, url });
+});
+
+// ─── DISCONNECT TELEGRAM ──────────────────────────────────────────────────────
+router.delete("/users/me/telegram", extractUser, requireAuth, async (req, res): Promise<void> => {
+  await db
+    .update(usersTable)
+    .set({ telegramChatId: null })
+    .where(eq(usersTable.id, req.userId!));
+  res.json({ ok: true });
 });
 
 // ─── PUBLIC PROFILE ───────────────────────────────────────────────────────────

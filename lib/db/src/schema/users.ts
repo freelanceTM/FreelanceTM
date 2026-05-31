@@ -21,6 +21,7 @@ export const usersTable = pgTable("users", {
   completedOrders: integer("completed_orders").notNull().default(0),
   balance: real("balance").notNull().default(0),
   pendingBalance: real("pending_balance").notNull().default(0),
+  telegramChatId: text("telegram_chat_id"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 

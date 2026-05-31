@@ -7,13 +7,16 @@ import { FavoriteButton } from "@/components/favorite-button";
 import { useI18n } from "@/lib/i18n";
 import { useAuth } from "@/hooks/use-auth";
 import { getGetUserQueryKey, useGetUser, useListGigs, getListGigsQueryKey } from "@workspace/api-client-react";
-import { MapPin, Calendar, Star, MessageCircle, ExternalLink, Clock, ShoppingBag } from "lucide-react";
+import { MapPin, Calendar, Star, MessageCircle, ExternalLink, Clock, ShoppingBag, Send, CheckCircle2, Unlink } from "lucide-react";
 import { Link } from "wouter";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useToast } from "@/hooks/use-toast";
 
 export default function Profile({ params }: { params: { userId: string } }) {
   const { t } = useI18n();
   const { user: currentUser } = useAuth();
+  const { toast } = useToast();
+  const qc = useQueryClient();
   const userId = parseInt(params.userId);
 
   const { data: profile, isLoading } = useGetUser(userId, {
@@ -24,6 +27,38 @@ export default function Profile({ params }: { params: { userId: string } }) {
     { sellerId: userId },
     { query: { enabled: !!userId, queryKey: getListGigsQueryKey({ sellerId: userId }) } }
   );
+
+  const isOwnProfile = currentUser?.id === userId;
+
+  // Telegram link — only fetched for own profile
+  const { data: tgLink, refetch: refetchTgLink, isFetching: tgLinkLoading } = useQuery({
+    queryKey: ["telegramLink", userId],
+    queryFn: async () => {
+      const tok = JSON.parse(localStorage.getItem("ftm_tokens") || "{}").accessToken || "";
+      const res = await fetch("/api/users/me/telegram-link", {
+        headers: { Authorization: `Bearer ${tok}` },
+      });
+      if (!res.ok) return null;
+      return res.json() as Promise<{ linked: boolean; url: string | null }>;
+    },
+    enabled: isOwnProfile,
+    staleTime: 30_000,
+  });
+
+  const disconnectTg = useMutation({
+    mutationFn: async () => {
+      const tok = JSON.parse(localStorage.getItem("ftm_tokens") || "{}").accessToken || "";
+      await fetch("/api/users/me/telegram", {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${tok}` },
+      });
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: getGetUserQueryKey(userId) });
+      qc.invalidateQueries({ queryKey: ["telegramLink", userId] });
+      toast({ title: "Telegram отключён" });
+    },
+  });
 
   const { data: sellerReviews, isLoading: reviewsLoading } = useQuery({
     queryKey: ["sellerReviews", userId],
@@ -48,8 +83,6 @@ export default function Profile({ params }: { params: { userId: string } }) {
     enabled: !!userId,
   });
 
-  const isOwnProfile = currentUser?.id === userId;
-
   if (isLoading) {
     return (
       <Layout>
@@ -67,6 +100,8 @@ export default function Profile({ params }: { params: { userId: string } }) {
   }
 
   if (!profile) return <Layout><div className="p-20 text-center text-muted-foreground">Пользователь не найден</div></Layout>;
+
+  const tgLinked = (profile as any).telegramLinked as boolean | undefined;
 
   return (
     <Layout>
@@ -150,6 +185,63 @@ export default function Profile({ params }: { params: { userId: string } }) {
               completedOrders={profile.completedOrders}
               showAll
             />
+
+            {/* Telegram connect — own profile only */}
+            {isOwnProfile && (
+              <div className={`p-4 rounded-xl border text-sm ${tgLinked ? "bg-blue-500/5 border-blue-500/20" : "bg-white/5 border-white/10"}`}>
+                <div className="flex items-center gap-2 mb-2">
+                  <Send className="w-4 h-4 text-blue-400 shrink-0" />
+                  <span className="font-semibold">Telegram уведомления</span>
+                </div>
+                {tgLinked ? (
+                  <div className="space-y-2">
+                    <div className="flex items-center gap-1.5 text-xs text-blue-400">
+                      <CheckCircle2 className="w-3.5 h-3.5" />
+                      Аккаунт подключён — вы будете получать уведомления о заказах
+                    </div>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="w-full text-xs text-muted-foreground hover:text-red-400 gap-1.5 h-7 mt-1"
+                      onClick={() => disconnectTg.mutate()}
+                      disabled={disconnectTg.isPending}
+                    >
+                      <Unlink className="w-3 h-3" />
+                      Отключить
+                    </Button>
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    <p className="text-xs text-muted-foreground">
+                      Получайте уведомления о новых заказах, сдаче работы и статусах прямо в Telegram.
+                    </p>
+                    {tgLink?.url ? (
+                      <a href={tgLink.url} target="_blank" rel="noopener noreferrer">
+                        <Button size="sm" className="w-full gap-2 h-8 bg-blue-500 hover:bg-blue-600 text-white text-xs">
+                          <Send className="w-3.5 h-3.5" />
+                          Подключить Telegram
+                        </Button>
+                      </a>
+                    ) : (
+                      <Button
+                        size="sm"
+                        className="w-full gap-2 h-8 bg-blue-500 hover:bg-blue-600 text-white text-xs"
+                        onClick={() => refetchTgLink()}
+                        disabled={tgLinkLoading}
+                      >
+                        <Send className="w-3.5 h-3.5" />
+                        {tgLinkLoading ? "Генерируем ссылку..." : "Подключить Telegram"}
+                      </Button>
+                    )}
+                    {tgLink?.url && (
+                      <p className="text-[10px] text-muted-foreground text-center">
+                        Ссылка действительна 15 минут
+                      </p>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Meta */}
             <div className="space-y-2.5 pt-4 border-t border-white/10 text-sm">
