@@ -1,10 +1,9 @@
-import { useState } from "react";
-import { Link, useLocation } from "wouter";
+import { useLocation, Link } from "wouter";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import * as z from "zod";
-import { useLogin, type UserProfile } from "@workspace/api-client-react";
-import { useAuth } from "@/hooks/use-auth";
+import { useLogin } from "@workspace/api-client-react";
+import { useAuth } from "@/contexts/AuthContext";
 import { useToast } from "@/hooks/use-toast";
 import { Button } from "@/components/ui/button";
 import {
@@ -23,55 +22,41 @@ const formSchema = z.object({
   password: z.string().min(6, "Password must be at least 6 characters"),
 });
 
+type FormValues = z.infer<typeof formSchema>;
+
 export default function Login() {
-  const [, setLocation] = useLocation();
-  const { login: setAuthUser } = useAuth();
+  const [location, setLocation] = useLocation();
+  const { login } = useAuth();
   const { toast } = useToast();
-  
-  const form = useForm<z.infer<typeof formSchema>>({
+
+  // Support ?redirect=/orders style post-login redirects
+  const params = new URLSearchParams(
+    typeof window !== "undefined" ? window.location.search : ""
+  );
+  const redirectTo = params.get("redirect") ?? "/catalog";
+
+  const form = useForm<FormValues>({
     resolver: zodResolver(formSchema),
-    defaultValues: {
-      email: "",
-      password: "",
-    },
+    defaultValues: { email: "", password: "" },
   });
 
   const loginMutation = useLogin();
 
-  function onSubmit(values: z.infer<typeof formSchema>) {
+  function onSubmit(values: FormValues) {
     loginMutation.mutate(
       { data: values },
       {
         onSuccess: (data) => {
-          setAuthUser(data.user);
-          toast({
-            title: "Welcome back!",
-            description: "You have successfully logged in.",
-          });
-          setLocation("/catalog");
+          login(data.token, data.user);
+          toast({ title: "Welcome back!", description: "You are now logged in." });
+          setLocation(redirectTo);
         },
-        onError: (error) => {
+        onError: () => {
           toast({
             variant: "destructive",
             title: "Login failed",
-            description: "Please check your credentials and try again.",
+            description: "Invalid email or password. Please try again.",
           });
-          console.error(error);
-          
-          // Fallback mock login for development if API fails
-          if (import.meta.env.DEV) {
-            console.log("Using fallback mock login");
-            const mockUser: UserProfile = {
-              id: 1,
-              email: values.email,
-              username: values.email.split('@')[0],
-              role: "buyer",
-              displayName: "Mock User",
-              skills: []
-            };
-            setAuthUser(mockUser);
-            setLocation("/catalog");
-          }
         },
       }
     );
@@ -91,9 +76,11 @@ export default function Login() {
         <div className="inline-flex bg-primary text-primary-foreground p-3 rounded-xl mb-4 shadow-lg shadow-primary/20">
           <Briefcase className="h-8 w-8" />
         </div>
-        <h2 className="text-3xl font-extrabold text-foreground tracking-tight">Log in to your account</h2>
+        <h2 className="text-3xl font-extrabold text-foreground tracking-tight">
+          Log in to your account
+        </h2>
         <p className="mt-2 text-sm text-muted-foreground">
-          Don't have an account?{" "}
+          Don&apos;t have an account?{" "}
           <Link href="/register" className="font-semibold text-accent hover:text-accent/80 transition-colors">
             Sign up
           </Link>
@@ -111,7 +98,12 @@ export default function Login() {
                   <FormItem>
                     <FormLabel>Email address</FormLabel>
                     <FormControl>
-                      <Input placeholder="name@example.com" {...field} className="h-11" />
+                      <Input
+                        data-testid="input-email"
+                        placeholder="name@example.com"
+                        {...field}
+                        className="h-11"
+                      />
                     </FormControl>
                     <FormMessage />
                   </FormItem>
@@ -124,31 +116,44 @@ export default function Login() {
                   <FormItem>
                     <div className="flex items-center justify-between">
                       <FormLabel>Password</FormLabel>
-                      <a href="#" className="text-xs font-semibold text-accent hover:text-accent/80 transition-colors">
-                        Forgot password?
-                      </a>
                     </div>
                     <FormControl>
-                      <Input type="password" placeholder="••••••••" {...field} className="h-11" />
+                      <Input
+                        data-testid="input-password"
+                        type="password"
+                        placeholder="••••••••"
+                        {...field}
+                        className="h-11"
+                      />
                     </FormControl>
                     <FormMessage />
                   </FormItem>
                 )}
               />
 
-              <Button 
-                type="submit" 
-                className="w-full h-11 text-base font-bold bg-primary hover:bg-primary/90" 
+              <Button
+                data-testid="button-submit"
+                type="submit"
+                className="w-full h-11 text-base font-bold bg-primary hover:bg-primary/90"
                 disabled={loginMutation.isPending}
               >
                 {loginMutation.isPending ? (
-                  <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Logging in...</>
+                  <>
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Logging in…
+                  </>
                 ) : (
                   "Log in"
                 )}
               </Button>
             </form>
           </Form>
+
+          {/* Demo credentials hint */}
+          <div className="mt-6 rounded-lg bg-muted/50 border border-border/40 p-3 text-xs text-muted-foreground space-y-1">
+            <p className="font-semibold text-foreground">Demo credentials</p>
+            <p>Buyer: <span className="font-mono">ivan@example.com</span> / <span className="font-mono">demo123</span></p>
+            <p>Freelancer: <span className="font-mono">alex@example.com</span> / <span className="font-mono">demo123</span></p>
+          </div>
         </div>
       </div>
     </div>
