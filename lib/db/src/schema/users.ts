@@ -19,6 +19,7 @@ export const usersTable = pgTable("users", {
   rating: real("rating"),
   reviewCount: integer("review_count").notNull().default(0),
   completedOrders: integer("completed_orders").notNull().default(0),
+  balance: real("balance").notNull().default(0),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 

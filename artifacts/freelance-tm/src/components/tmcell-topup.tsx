@@ -6,7 +6,7 @@ import { Label } from "@/components/ui/label";
 import { useToast } from "@/hooks/use-toast";
 import { Loader2, Upload, Smartphone } from "lucide-react";
 
-const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:3000";
+const API_BASE = import.meta.env.VITE_API_URL || "";
 
 export function TmCellTopup({ onSuccess }: { onSuccess?: () => void }) {
   const [open, setOpen] = useState(false);
@@ -30,24 +30,41 @@ export function TmCellTopup({ onSuccess }: { onSuccess?: () => void }) {
 
     setLoading(true);
     try {
-      const formData = new FormData();
-      formData.append("amount", amount);
-      if (file) formData.append("screenshot", file);
+      let screenshotPayload: { data: string; name: string } | undefined;
+      if (file) {
+        const base64 = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.readAsDataURL(file);
+          reader.onload = () => resolve(reader.result as string);
+          reader.onerror = reject;
+        });
+        screenshotPayload = { data: base64, name: file.name };
+      }
 
-      const res = await fetch(`${API_BASE}/api/payments/topup`, {
+      const res = await fetch(`${API_BASE}/api/wallet/topup`, {
         method: "POST",
-        headers: { Authorization: `Bearer ${tokens.accessToken}` },
-        body: formData,
+        headers: {
+          Authorization: `Bearer ${tokens.accessToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ amount: parseFloat(amount), screenshot: screenshotPayload }),
       });
-      if (!res.ok) throw new Error("Upload failed");
 
-      toast({ title: "Заявка на пополнение отправлена!", description: "Ожидайте подтверждения администратора." });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || "Ошибка отправки");
+      }
+
+      toast({
+        title: "Заявка отправлена!",
+        description: "Средства зачислены — ожидайте подтверждения администратора.",
+      });
       setOpen(false);
       setAmount("");
       setFile(null);
       onSuccess?.();
-    } catch {
-      toast({ title: "Ошибка отправки", variant: "destructive" });
+    } catch (err: any) {
+      toast({ title: err.message || "Ошибка отправки", variant: "destructive" });
     } finally {
       setLoading(false);
     }
@@ -75,10 +92,10 @@ export function TmCellTopup({ onSuccess }: { onSuccess?: () => void }) {
           <div className="p-3 rounded-lg bg-white/5 border border-white/10 text-sm space-y-1">
             <p className="text-muted-foreground">Инструкция:</p>
             <ol className="list-decimal list-inside text-xs text-muted-foreground space-y-1">
-              <li>Переведите сумму на SIM-карту TM CELL</li>
+              <li>Переведите сумму на номер: <span className="font-mono text-primary">+993 6X XX XX XX</span></li>
               <li>Сделайте скриншот чека/подтверждения</li>
               <li>Укажите сумму и прикрепите скриншот ниже</li>
-              <li>Администратор проверит и зачислит средства</li>
+              <li>Средства будут зачислены автоматически</li>
             </ol>
           </div>
 

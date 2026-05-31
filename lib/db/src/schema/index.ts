@@ -4,3 +4,4 @@ export * from "./gigs";
 export * from "./tenders";
 export * from "./orders";
 export * from "./wallet";
+export * from "./topups";

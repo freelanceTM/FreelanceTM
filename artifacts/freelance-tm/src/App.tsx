@@ -18,6 +18,8 @@ import Orders from "@/pages/orders";
 import Onboarding from "@/pages/onboarding";
 import Favorites from "@/pages/favorites";
 import HowItWorks from "@/pages/how-it-works";
+import WalletPage from "@/pages/wallet";
+import AdminPage from "@/pages/admin";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -43,6 +45,8 @@ function Router() {
       <Route path="/onboarding" component={Onboarding} />
       <Route path="/favorites" component={Favorites} />
       <Route path="/how-it-works" component={HowItWorks} />
+      <Route path="/wallet" component={WalletPage} />
+      <Route path="/admin" component={AdminPage} />
       <Route component={NotFound} />
     </Switch>
   );

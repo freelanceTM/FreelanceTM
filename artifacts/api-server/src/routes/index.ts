@@ -6,6 +6,8 @@ import gigsRouter from "./gigs";
 import tendersRouter from "./tenders";
 import ordersRouter from "./orders";
 import usersRouter from "./users";
+import walletRouter from "./wallet";
+import adminRouter from "./admin";
 
 const router: IRouter = Router();
 
@@ -16,5 +18,7 @@ router.use(gigsRouter);
 router.use(tendersRouter);
 router.use(ordersRouter);
 router.use(usersRouter);
+router.use(walletRouter);
+router.use(adminRouter);
 
 export default router;
