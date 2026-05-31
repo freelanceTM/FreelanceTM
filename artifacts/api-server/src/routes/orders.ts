@@ -1,7 +1,7 @@
 import { Router, type IRouter } from "express";
-import { db, ordersTable, usersTable, gigsTable } from "@workspace/db";
-import { eq, and } from "drizzle-orm";
-import { ListOrdersQueryParams, GetOrderParams, UpdateOrderStatusParams, UpdateOrderStatusBody } from "@workspace/api-zod";
+import { db, ordersTable, usersTable, gigsTable, tendersTable, tenderBidsTable } from "@workspace/db";
+import { eq, and, or } from "drizzle-orm";
+import { extractUser, requireAuth } from "../middleware/auth";
 
 const router: IRouter = Router();
 
@@ -9,13 +9,19 @@ function orderWithDetails(
   order: typeof ordersTable.$inferSelect,
   buyer: typeof usersTable.$inferSelect,
   seller: typeof usersTable.$inferSelect,
-  gig: typeof gigsTable.$inferSelect,
+  gig: typeof gigsTable.$inferSelect | null,
+  tender: typeof tendersTable.$inferSelect | null,
 ) {
   return {
     id: order.id,
-    gigId: order.gigId,
-    gigTitle: gig.title,
-    gigImageUrl: gig.imageUrl ?? null,
+    gigId: order.gigId ?? null,
+    tenderId: order.tenderId ?? null,
+    tenderBidId: order.tenderBidId ?? null,
+    // For tender orders, gigTitle surfaces the tender title so the Orders UI
+    // works without any frontend changes.
+    gigTitle: gig?.title ?? tender?.title ?? "Contract",
+    gigImageUrl: gig?.imageUrl ?? null,
+    isTenderOrder: order.gigId === null,
     buyerId: order.buyerId,
     buyerName: buyer.displayName ?? buyer.username,
     sellerId: order.sellerId,
@@ -29,85 +35,86 @@ function orderWithDetails(
   };
 }
 
-router.get("/orders", async (req, res): Promise<void> => {
-  const params = ListOrdersQueryParams.safeParse(req.query);
-  if (!params.success) {
-    res.status(400).json({ error: params.error.message });
-    return;
+async function enrichOrder(order: typeof ordersTable.$inferSelect) {
+  const [buyer] = await db.select().from(usersTable).where(eq(usersTable.id, order.buyerId));
+  const [seller] = await db.select().from(usersTable).where(eq(usersTable.id, order.sellerId));
+  const gig = order.gigId
+    ? (await db.select().from(gigsTable).where(eq(gigsTable.id, order.gigId)))[0] ?? null
+    : null;
+  const tender = order.tenderId
+    ? (await db.select().from(tendersTable).where(eq(tendersTable.id, order.tenderId)))[0] ?? null
+    : null;
+  return orderWithDetails(order, buyer, seller, gig, tender);
+}
+
+// ─── LIST ─────────────────────────────────────────────────────────────────────
+
+router.get("/orders", extractUser, requireAuth, async (req, res): Promise<void> => {
+  const status = req.query.status ? String(req.query.status) : undefined;
+  const userId = req.userId!;
+
+  const conditions = [
+    or(eq(ordersTable.buyerId, userId), eq(ordersTable.sellerId, userId))!,
+  ];
+  if (status && ["active","delivered","completed","revision","cancelled"].includes(status)) {
+    conditions.push(eq(ordersTable.status, status as "active" | "delivered" | "completed" | "revision" | "cancelled"));
   }
 
-  const buyerAlias = usersTable;
-  const conditions = [];
-  if (params.data.status) {
-    conditions.push(eq(ordersTable.status, params.data.status as "active" | "delivered" | "completed" | "revision" | "cancelled"));
-  }
-
-  const rows = await db
-    .select({
-      order: ordersTable,
-      gig: gigsTable,
-    })
+  const orders = await db
+    .select()
     .from(ordersTable)
-    .innerJoin(gigsTable, eq(gigsTable.id, ordersTable.gigId))
-    .where(conditions.length > 0 ? and(...conditions) : undefined);
+    .where(and(...conditions))
+    .orderBy(ordersTable.createdAt);
 
-  const result = await Promise.all(
-    rows.map(async (r) => {
-      const [buyer] = await db.select().from(usersTable).where(eq(usersTable.id, r.order.buyerId));
-      const [seller] = await db.select().from(usersTable).where(eq(usersTable.id, r.order.sellerId));
-      return orderWithDetails(r.order, buyer, seller, r.gig);
-    })
-  );
-
-  res.json(result);
+  const result = await Promise.all(orders.map(enrichOrder));
+  res.json({ items: result });
 });
 
-router.get("/orders/:id", async (req, res): Promise<void> => {
-  const rawId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
-  const params = GetOrderParams.safeParse({ id: parseInt(rawId, 10) });
-  if (!params.success) {
-    res.status(400).json({ error: params.error.message });
+// ─── GET SINGLE ───────────────────────────────────────────────────────────────
+
+router.get("/orders/:id", extractUser, requireAuth, async (req, res): Promise<void> => {
+  const orderId = parseInt(req.params.id, 10);
+  if (isNaN(orderId) || orderId <= 0) {
+    res.status(400).json({ error: "Invalid order id" });
     return;
   }
 
-  const [row] = await db
-    .select({ order: ordersTable, gig: gigsTable })
-    .from(ordersTable)
-    .innerJoin(gigsTable, eq(gigsTable.id, ordersTable.gigId))
-    .where(eq(ordersTable.id, params.data.id));
-
-  if (!row) {
+  const [order] = await db.select().from(ordersTable).where(eq(ordersTable.id, orderId));
+  if (!order) {
     res.status(404).json({ error: "Order not found" });
     return;
   }
-
-  const [buyer] = await db.select().from(usersTable).where(eq(usersTable.id, row.order.buyerId));
-  const [seller] = await db.select().from(usersTable).where(eq(usersTable.id, row.order.sellerId));
-
-  res.json(orderWithDetails(row.order, buyer, seller, row.gig));
-});
-
-router.patch("/orders/:id/status", async (req, res): Promise<void> => {
-  const rawId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
-  const pathParams = UpdateOrderStatusParams.safeParse({ id: parseInt(rawId, 10) });
-  if (!pathParams.success) {
-    res.status(400).json({ error: pathParams.error.message });
+  if (order.buyerId !== req.userId && order.sellerId !== req.userId) {
+    res.status(403).json({ error: "Access denied" });
     return;
   }
 
-  const parsed = UpdateOrderStatusBody.safeParse(req.body);
-  if (!parsed.success) {
-    res.status(400).json({ error: parsed.error.message });
+  res.json(await enrichOrder(order));
+});
+
+// ─── UPDATE STATUS ────────────────────────────────────────────────────────────
+
+router.patch("/orders/:id/status", extractUser, requireAuth, async (req, res): Promise<void> => {
+  const orderId = parseInt(req.params.id, 10);
+  if (isNaN(orderId) || orderId <= 0) {
+    res.status(400).json({ error: "Invalid order id" });
+    return;
+  }
+
+  const { status, note } = req.body as { status?: string; note?: string };
+  const validStatuses = ["active", "delivered", "completed", "revision", "cancelled"] as const;
+  if (!status || !validStatuses.includes(status as typeof validStatuses[number])) {
+    res.status(400).json({ error: "Invalid status" });
     return;
   }
 
   const [updated] = await db
     .update(ordersTable)
     .set({
-      status: parsed.data.status as "active" | "delivered" | "completed" | "revision" | "cancelled",
-      deliveryNote: parsed.data.note ?? null,
+      status: status as typeof validStatuses[number],
+      deliveryNote: note ?? null,
     })
-    .where(eq(ordersTable.id, pathParams.data.id))
+    .where(eq(ordersTable.id, orderId))
     .returning();
 
   if (!updated) {
@@ -115,11 +122,7 @@ router.patch("/orders/:id/status", async (req, res): Promise<void> => {
     return;
   }
 
-  const [gig] = await db.select().from(gigsTable).where(eq(gigsTable.id, updated.gigId));
-  const [buyer] = await db.select().from(usersTable).where(eq(usersTable.id, updated.buyerId));
-  const [seller] = await db.select().from(usersTable).where(eq(usersTable.id, updated.sellerId));
-
-  res.json(orderWithDetails(updated, buyer, seller, gig));
+  res.json(await enrichOrder(updated));
 });
 
 export default router;

@@ -1,5 +1,5 @@
 import { Router, type IRouter } from "express";
-import { db, tendersTable, tenderBidsTable, usersTable, categoriesTable } from "@workspace/db";
+import { db, tendersTable, tenderBidsTable, ordersTable, usersTable, categoriesTable } from "@workspace/db";
 import { eq, and, like, desc, count, sql } from "drizzle-orm";
 import { extractUser, requireAuth } from "../middleware/auth";
 import { z } from "zod";
@@ -87,7 +87,7 @@ router.get("/tenders", async (req, res): Promise<void> => {
   });
 });
 
-// ─── MY TENDERS (buyer's posted tenders) ──────────────────────────────────
+// ─── MY TENDERS (buyer) ────────────────────────────────────────────────────
 
 router.get("/tenders/my-tenders", extractUser, requireAuth, async (req, res): Promise<void> => {
   const buyerId = req.userId!;
@@ -102,7 +102,7 @@ router.get("/tenders/my-tenders", extractUser, requireAuth, async (req, res): Pr
   res.json({ items: rows.map((r) => tenderWithDetails(r.tender, r.buyer, r.category)) });
 });
 
-// ─── MY BIDS (freelancer's submitted bids) ────────────────────────────────
+// ─── MY BIDS (freelancer) ──────────────────────────────────────────────────
 
 router.get("/tenders/my-bids", extractUser, requireAuth, async (req, res): Promise<void> => {
   const freelancerId = req.userId!;
@@ -229,7 +229,6 @@ router.post("/tenders/:id/bid", extractUser, requireAuth, async (req, res): Prom
     return;
   }
 
-  // Upsert bid
   const [existing] = await db
     .select()
     .from(tenderBidsTable)
@@ -255,7 +254,6 @@ router.post("/tenders/:id/bid", extractUser, requireAuth, async (req, res): Prom
       })
       .returning();
     bid = inserted;
-    // Increment proposal count only for new bids
     await db
       .update(tendersTable)
       .set({ proposalCount: sql`${tendersTable.proposalCount} + 1` })
@@ -303,7 +301,7 @@ router.get("/tenders/:id/bids", extractUser, requireAuth, async (req, res): Prom
   res.json({ items: rows.map((r) => bidWithFreelancer(r.bid, r.freelancer)) });
 });
 
-// ─── SELECT / ACCEPT BID (buyer only) ─────────────────────────────────────
+// ─── SELECT / ACCEPT BID → creates real Order ─────────────────────────────
 
 router.patch("/tenders/:id/select-bid/:bidId", extractUser, requireAuth, async (req, res): Promise<void> => {
   const tenderId = parseInt(req.params.id, 10);
@@ -355,6 +353,25 @@ router.patch("/tenders/:id/select-bid/:bidId", extractUser, requireAuth, async (
     .where(eq(tendersTable.id, tenderId))
     .returning();
 
+  // ── CREATE REAL ORDER RECORD ──────────────────────────────────────────────
+  // gigId is null → this is a tender-based order, not a gig order.
+  // deliveryDays drives the dueDate so the order state machine works
+  // (delivery, revision, completion) exactly as it does for gig orders.
+  const dueDate = new Date(Date.now() + bid.deliveryDays * 24 * 60 * 60 * 1000);
+  const [order] = await db
+    .insert(ordersTable)
+    .values({
+      gigId: null,
+      tenderId,
+      tenderBidId: bid.id,
+      buyerId: tender.buyerId,
+      sellerId: bid.freelancerId,
+      price: bid.price,
+      deliveryDays: bid.deliveryDays,
+      dueDate,
+    })
+    .returning();
+
   // Fetch freelancer info for response
   const [freelancer] = await db.select().from(usersTable).where(eq(usersTable.id, bid.freelancerId));
 
@@ -365,6 +382,14 @@ router.patch("/tenders/:id/select-bid/:bidId", extractUser, requireAuth, async (
       status: updatedTender.status,
     },
     bid: bidWithFreelancer(selectedBid, freelancer),
+    order: {
+      id: order.id,
+      status: order.status,
+      price: order.price,
+      deliveryDays: order.deliveryDays,
+      dueDate: order.dueDate,
+      createdAt: order.createdAt,
+    },
   });
 });
 

@@ -41,6 +41,7 @@ import type {
   PlatformStats,
   Review,
   ReviewInput,
+  SelectBidOrder,
   SelectBidResult,
   Tender,
   TenderBid,

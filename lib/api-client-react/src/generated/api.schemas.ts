@@ -504,6 +504,16 @@ export interface MyBidList {
   items: MyBid[];
 }
 
+export interface SelectBidOrder {
+  id: number;
+  status: string;
+  price: number;
+  deliveryDays: number;
+  /** @nullable */
+  dueDate?: string | null;
+  createdAt?: string;
+}
+
 export interface SelectBidResult {
   tender: {
     id: number;
@@ -511,4 +521,5 @@ export interface SelectBidResult {
     status: TenderStatus;
   };
   bid: TenderBidWithFreelancer;
+  order: SelectBidOrder;
 }
