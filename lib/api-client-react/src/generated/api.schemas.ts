@@ -393,3 +393,69 @@ export const ListOrdersStatus = {
   disputed: 'disputed',
 } as const;
 
+export type TenderStatus = typeof TenderStatus[keyof typeof TenderStatus];
+
+export const TenderStatus = {
+  open: 'open',
+  in_progress: 'in_progress',
+  closed: 'closed',
+} as const;
+
+export interface Tender {
+  id: number;
+  title: string;
+  description: string;
+  budget: number;
+  categoryId: number;
+  /** @nullable */
+  categoryName?: string | null;
+  buyerId: number;
+  buyerName: string;
+  /** @nullable */
+  buyerAvatarUrl?: string | null;
+  status: TenderStatus;
+  proposalCount: number;
+  /** @nullable */
+  deadline?: string | null;
+  skills?: string[];
+  createdAt?: string;
+}
+
+export interface TenderList {
+  items: Tender[];
+  total: number;
+  page: number;
+}
+
+export interface TenderInput {
+  title: string;
+  description: string;
+  budget: number;
+  categoryId: number;
+  deadline?: string;
+  skills?: string[];
+}
+
+export interface TenderBidInput {
+  price: number;
+  deliveryDays: number;
+  message?: string;
+}
+
+export interface TenderBid {
+  id: number;
+  tenderId: number;
+  freelancerId: number;
+  price: number;
+  deliveryDays: number;
+  /** @nullable */
+  message?: string | null;
+  status: string;
+  createdAt: string;
+}
+
+export interface ListTendersParams {
+  categoryId?: number | null;
+  search?: string | null;
+  page?: number | null;
+}
