@@ -1,4 +1,4 @@
-import { pgTable, text, serial, integer, real, timestamp, pgEnum } from "drizzle-orm/pg-core";
+import { pgTable, text, serial, integer, real, timestamp, pgEnum, boolean } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod/v4";
 import { usersTable } from "./users";
@@ -20,6 +20,20 @@ export const tendersTable = pgTable("tenders", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
+export const tenderBidsTable = pgTable("tender_bids", {
+  id: serial("id").primaryKey(),
+  tenderId: integer("tender_id").notNull().references(() => tendersTable.id, { onDelete: "cascade" }),
+  freelancerId: integer("freelancer_id").notNull().references(() => usersTable.id, { onDelete: "cascade" }),
+  price: real("price").notNull(),
+  deliveryDays: integer("delivery_days").notNull().default(3),
+  message: text("message"),
+  isSelected: boolean("is_selected").notNull().default(false),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
 export const insertTenderSchema = createInsertSchema(tendersTable).omit({ id: true, createdAt: true });
+export const insertTenderBidSchema = createInsertSchema(tenderBidsTable).omit({ id: true, createdAt: true });
 export type InsertTender = z.infer<typeof insertTenderSchema>;
+export type InsertTenderBid = z.infer<typeof insertTenderBidSchema>;
 export type Tender = typeof tendersTable.$inferSelect;
+export type TenderBid = typeof tenderBidsTable.$inferSelect;

@@ -1,171 +1,371 @@
 import { Router, type IRouter } from "express";
-  import { db, tendersTable, usersTable, categoriesTable } from "@workspace/db";
-  import { eq, and, like, desc, count, sql } from "drizzle-orm";
-  import { ListTendersQueryParams, GetTenderParams, CreateTenderBody } from "@workspace/api-zod";
-  import { extractUser, requireAuth } from "../middleware/auth";
-  import { z } from "zod";
+import { db, tendersTable, tenderBidsTable, usersTable, categoriesTable } from "@workspace/db";
+import { eq, and, like, desc, count, sql } from "drizzle-orm";
+import { extractUser, requireAuth } from "../middleware/auth";
+import { z } from "zod";
 
-  const router: IRouter = Router();
+const router: IRouter = Router();
 
-  function tenderWithDetails(
-    tender: typeof tendersTable.$inferSelect,
-    buyer: typeof usersTable.$inferSelect,
-    category: typeof categoriesTable.$inferSelect | null,
-  ) {
-    return {
-      id: tender.id,
-      title: tender.title,
-      description: tender.description,
-      budget: tender.budget,
-      categoryId: tender.categoryId,
-      categoryName: category?.name ?? null,
-      buyerId: tender.buyerId,
-      buyerName: buyer.displayName ?? buyer.username,
-      buyerAvatarUrl: buyer.avatarUrl ?? null,
-      status: tender.status,
-      proposalCount: tender.proposalCount,
-      deadline: tender.deadline ?? null,
-      skills: tender.skills,
-      createdAt: tender.createdAt,
-    };
+function tenderWithDetails(
+  tender: typeof tendersTable.$inferSelect,
+  buyer: typeof usersTable.$inferSelect,
+  category: typeof categoriesTable.$inferSelect | null,
+) {
+  return {
+    id: tender.id,
+    title: tender.title,
+    description: tender.description,
+    budget: tender.budget,
+    categoryId: tender.categoryId,
+    categoryName: category?.name ?? null,
+    buyerId: tender.buyerId,
+    buyerName: buyer.displayName ?? buyer.username,
+    buyerAvatarUrl: buyer.avatarUrl ?? null,
+    status: tender.status,
+    proposalCount: tender.proposalCount,
+    deadline: tender.deadline ?? null,
+    skills: tender.skills,
+    createdAt: tender.createdAt,
+  };
+}
+
+function bidWithFreelancer(
+  bid: typeof tenderBidsTable.$inferSelect,
+  freelancer: typeof usersTable.$inferSelect,
+) {
+  return {
+    id: bid.id,
+    tenderId: bid.tenderId,
+    freelancerId: bid.freelancerId,
+    freelancerName: freelancer.displayName ?? freelancer.username,
+    freelancerAvatarUrl: freelancer.avatarUrl ?? null,
+    freelancerLevel: (freelancer as Record<string, unknown>).level as string | null ?? null,
+    freelancerRating: (freelancer as Record<string, unknown>).rating as number | null ?? null,
+    price: bid.price,
+    deliveryDays: bid.deliveryDays,
+    message: bid.message ?? null,
+    isSelected: bid.isSelected,
+    createdAt: bid.createdAt,
+  };
+}
+
+// ─── LIST ──────────────────────────────────────────────────────────────────
+
+router.get("/tenders", async (req, res): Promise<void> => {
+  const page = parseInt(String(req.query.page ?? "1"), 10) || 1;
+  const search = req.query.search ? String(req.query.search) : undefined;
+  const categoryId = req.query.categoryId ? parseInt(String(req.query.categoryId), 10) : undefined;
+  const status = req.query.status ? String(req.query.status) : undefined;
+  const limit = 20;
+  const offset = (page - 1) * limit;
+
+  const conditions: ReturnType<typeof eq>[] = [];
+  if (categoryId && !isNaN(categoryId)) conditions.push(eq(tendersTable.categoryId, categoryId));
+  if (search) conditions.push(like(tendersTable.title, `%${search}%`));
+  if (status && ["open","in_progress","closed"].includes(status)) {
+    conditions.push(eq(tendersTable.status, status as "open" | "in_progress" | "closed"));
   }
 
-  router.get("/tenders", async (req, res): Promise<void> => {
-    const params = ListTendersQueryParams.safeParse(req.query);
-    if (!params.success) {
-      res.status(400).json({ error: params.error.message });
-      return;
-    }
+  const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
 
-    const { categoryId, search, page = 1 } = params.data;
-    const limit = 20;
-    const offset = ((page ?? 1) - 1) * limit;
+  const rows = await db
+    .select({ tender: tendersTable, buyer: usersTable, category: categoriesTable })
+    .from(tendersTable)
+    .innerJoin(usersTable, eq(usersTable.id, tendersTable.buyerId))
+    .leftJoin(categoriesTable, eq(categoriesTable.id, tendersTable.categoryId))
+    .where(whereClause)
+    .orderBy(desc(tendersTable.createdAt))
+    .limit(limit)
+    .offset(offset);
 
-    const conditions = [];
-    if (categoryId != null) conditions.push(eq(tendersTable.categoryId, categoryId));
-    if (search) conditions.push(like(tendersTable.title, `%${search}%`));
+  const [totalRow] = await db.select({ total: count() }).from(tendersTable).where(whereClause);
 
-    const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
-
-    const rows = await db
-      .select({ tender: tendersTable, buyer: usersTable, category: categoriesTable })
-      .from(tendersTable)
-      .innerJoin(usersTable, eq(usersTable.id, tendersTable.buyerId))
-      .leftJoin(categoriesTable, eq(categoriesTable.id, tendersTable.categoryId))
-      .where(whereClause)
-      .orderBy(desc(tendersTable.createdAt))
-      .limit(limit)
-      .offset(offset);
-
-    const [totalRow] = await db.select({ total: count() }).from(tendersTable).where(whereClause);
-
-    res.json({
-      items: rows.map((r) => tenderWithDetails(r.tender, r.buyer, r.category)),
-      total: totalRow?.total ?? 0,
-      page: page ?? 1,
-    });
+  res.json({
+    items: rows.map((r) => tenderWithDetails(r.tender, r.buyer, r.category)),
+    total: totalRow?.total ?? 0,
+    page,
   });
+});
 
-  router.get("/tenders/:id", async (req, res): Promise<void> => {
-    const rawId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
-    const params = GetTenderParams.safeParse({ id: parseInt(rawId, 10) });
-    if (!params.success) {
-      res.status(400).json({ error: params.error.message });
-      return;
-    }
+// ─── MY TENDERS (buyer's posted tenders) ──────────────────────────────────
 
-    const [row] = await db
-      .select({ tender: tendersTable, buyer: usersTable, category: categoriesTable })
-      .from(tendersTable)
-      .innerJoin(usersTable, eq(usersTable.id, tendersTable.buyerId))
-      .leftJoin(categoriesTable, eq(categoriesTable.id, tendersTable.categoryId))
-      .where(eq(tendersTable.id, params.data.id));
+router.get("/tenders/my-tenders", extractUser, requireAuth, async (req, res): Promise<void> => {
+  const buyerId = req.userId!;
+  const rows = await db
+    .select({ tender: tendersTable, buyer: usersTable, category: categoriesTable })
+    .from(tendersTable)
+    .innerJoin(usersTable, eq(usersTable.id, tendersTable.buyerId))
+    .leftJoin(categoriesTable, eq(categoriesTable.id, tendersTable.categoryId))
+    .where(eq(tendersTable.buyerId, buyerId))
+    .orderBy(desc(tendersTable.createdAt));
 
-    if (!row) {
-      res.status(404).json({ error: "Tender not found" });
-      return;
-    }
+  res.json({ items: rows.map((r) => tenderWithDetails(r.tender, r.buyer, r.category)) });
+});
 
-    res.json(tenderWithDetails(row.tender, row.buyer, row.category));
+// ─── MY BIDS (freelancer's submitted bids) ────────────────────────────────
+
+router.get("/tenders/my-bids", extractUser, requireAuth, async (req, res): Promise<void> => {
+  const freelancerId = req.userId!;
+
+  const rows = await db
+    .select({ bid: tenderBidsTable, tender: tendersTable, buyer: usersTable, category: categoriesTable })
+    .from(tenderBidsTable)
+    .innerJoin(tendersTable, eq(tendersTable.id, tenderBidsTable.tenderId))
+    .innerJoin(usersTable, eq(usersTable.id, tendersTable.buyerId))
+    .leftJoin(categoriesTable, eq(categoriesTable.id, tendersTable.categoryId))
+    .where(eq(tenderBidsTable.freelancerId, freelancerId))
+    .orderBy(desc(tenderBidsTable.createdAt));
+
+  res.json({
+    items: rows.map((r) => ({
+      id: r.bid.id,
+      tenderId: r.bid.tenderId,
+      tenderTitle: r.tender.title,
+      tenderBudget: r.tender.budget,
+      tenderStatus: r.tender.status,
+      categoryName: r.category?.name ?? null,
+      buyerName: r.buyer.displayName ?? r.buyer.username,
+      price: r.bid.price,
+      deliveryDays: r.bid.deliveryDays,
+      message: r.bid.message ?? null,
+      isSelected: r.bid.isSelected,
+      createdAt: r.bid.createdAt,
+    })),
   });
+});
 
-  router.post("/tenders", extractUser, requireAuth, async (req, res): Promise<void> => {
-    const parsed = CreateTenderBody.safeParse(req.body);
-    if (!parsed.success) {
-      res.status(400).json({ error: parsed.error.message });
-      return;
-    }
+// ─── GET SINGLE TENDER ────────────────────────────────────────────────────
 
-    const buyerId = req.userId!;
-    const [tender] = await db.insert(tendersTable).values({
-      ...parsed.data,
-      buyerId,
-      skills: parsed.data.skills ?? [],
-      deadline: parsed.data.deadline ? new Date(parsed.data.deadline) : null,
-    }).returning();
+router.get("/tenders/:id", async (req, res): Promise<void> => {
+  const tenderId = parseInt(req.params.id, 10);
+  if (isNaN(tenderId) || tenderId <= 0) {
+    res.status(400).json({ error: "Invalid tender id" });
+    return;
+  }
 
-    const [row] = await db
-      .select({ tender: tendersTable, buyer: usersTable, category: categoriesTable })
-      .from(tendersTable)
-      .innerJoin(usersTable, eq(usersTable.id, tendersTable.buyerId))
-      .leftJoin(categoriesTable, eq(categoriesTable.id, tendersTable.categoryId))
-      .where(eq(tendersTable.id, tender.id));
+  const [row] = await db
+    .select({ tender: tendersTable, buyer: usersTable, category: categoriesTable })
+    .from(tendersTable)
+    .innerJoin(usersTable, eq(usersTable.id, tendersTable.buyerId))
+    .leftJoin(categoriesTable, eq(categoriesTable.id, tendersTable.categoryId))
+    .where(eq(tendersTable.id, tenderId));
 
-    res.status(201).json(tenderWithDetails(row.tender, row.buyer, row.category));
-  });
+  if (!row) {
+    res.status(404).json({ error: "Tender not found" });
+    return;
+  }
 
-  const TenderBidBody = z.object({
-    price: z.number().positive(),
-    deliveryDays: z.number().int().positive().max(365),
-    message: z.string().max(2000).optional(),
-  });
+  res.json(tenderWithDetails(row.tender, row.buyer, row.category));
+});
 
-  router.post("/tenders/:id/bid", extractUser, requireAuth, async (req, res): Promise<void> => {
-    const rawId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
-    const tenderId = parseInt(rawId, 10);
-    if (isNaN(tenderId) || tenderId <= 0) {
-      res.status(400).json({ error: "Invalid tender id" });
-      return;
-    }
+// ─── CREATE TENDER ────────────────────────────────────────────────────────
 
-    const parsed = TenderBidBody.safeParse(req.body);
-    if (!parsed.success) {
-      res.status(400).json({ error: parsed.error.message });
-      return;
-    }
+const CreateTenderBody = z.object({
+  title: z.string().min(5).max(200),
+  description: z.string().min(20),
+  budget: z.number().positive(),
+  categoryId: z.number().int().positive(),
+  deadline: z.string().optional(),
+  skills: z.array(z.string()).optional(),
+});
 
-    const [tender] = await db
-      .select()
-      .from(tendersTable)
-      .where(eq(tendersTable.id, tenderId));
+router.post("/tenders", extractUser, requireAuth, async (req, res): Promise<void> => {
+  const parsed = CreateTenderBody.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: parsed.error.message });
+    return;
+  }
 
-    if (!tender) {
-      res.status(404).json({ error: "Tender not found" });
-      return;
-    }
+  const buyerId = req.userId!;
+  const [tender] = await db.insert(tendersTable).values({
+    ...parsed.data,
+    buyerId,
+    skills: parsed.data.skills ?? [],
+    deadline: parsed.data.deadline ? new Date(parsed.data.deadline) : null,
+  }).returning();
 
-    if (tender.status !== "open") {
-      res.status(409).json({ error: "This tender is no longer accepting proposals" });
-      return;
-    }
+  const [row] = await db
+    .select({ tender: tendersTable, buyer: usersTable, category: categoriesTable })
+    .from(tendersTable)
+    .innerJoin(usersTable, eq(usersTable.id, tendersTable.buyerId))
+    .leftJoin(categoriesTable, eq(categoriesTable.id, tendersTable.categoryId))
+    .where(eq(tendersTable.id, tender.id));
 
-    // Increment proposal count
+  res.status(201).json(tenderWithDetails(row.tender, row.buyer, row.category));
+});
+
+// ─── SUBMIT BID ───────────────────────────────────────────────────────────
+
+const TenderBidBody = z.object({
+  price: z.number().positive(),
+  deliveryDays: z.number().int().positive().max(365),
+  message: z.string().max(2000).optional(),
+});
+
+router.post("/tenders/:id/bid", extractUser, requireAuth, async (req, res): Promise<void> => {
+  const tenderId = parseInt(req.params.id, 10);
+  if (isNaN(tenderId) || tenderId <= 0) {
+    res.status(400).json({ error: "Invalid tender id" });
+    return;
+  }
+
+  const parsed = TenderBidBody.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: parsed.error.message });
+    return;
+  }
+
+  const [tender] = await db.select().from(tendersTable).where(eq(tendersTable.id, tenderId));
+  if (!tender) {
+    res.status(404).json({ error: "Tender not found" });
+    return;
+  }
+  if (tender.status !== "open") {
+    res.status(409).json({ error: "This tender is no longer accepting proposals" });
+    return;
+  }
+  if (tender.buyerId === req.userId) {
+    res.status(403).json({ error: "Cannot bid on your own tender" });
+    return;
+  }
+
+  // Upsert bid
+  const [existing] = await db
+    .select()
+    .from(tenderBidsTable)
+    .where(and(eq(tenderBidsTable.tenderId, tenderId), eq(tenderBidsTable.freelancerId, req.userId!)));
+
+  let bid: typeof tenderBidsTable.$inferSelect;
+  if (existing) {
+    const [updated] = await db
+      .update(tenderBidsTable)
+      .set({ price: parsed.data.price, deliveryDays: parsed.data.deliveryDays, message: parsed.data.message ?? null })
+      .where(eq(tenderBidsTable.id, existing.id))
+      .returning();
+    bid = updated;
+  } else {
+    const [inserted] = await db
+      .insert(tenderBidsTable)
+      .values({
+        tenderId,
+        freelancerId: req.userId!,
+        price: parsed.data.price,
+        deliveryDays: parsed.data.deliveryDays,
+        message: parsed.data.message ?? null,
+      })
+      .returning();
+    bid = inserted;
+    // Increment proposal count only for new bids
     await db
       .update(tendersTable)
       .set({ proposalCount: sql`${tendersTable.proposalCount} + 1` })
       .where(eq(tendersTable.id, tenderId));
+  }
 
-    res.status(201).json({
-      id: Date.now(),
-      tenderId,
-      freelancerId: req.userId!,
-      price: parsed.data.price,
-      deliveryDays: parsed.data.deliveryDays,
-      message: parsed.data.message ?? null,
-      status: "pending",
-      createdAt: new Date().toISOString(),
-    });
+  res.status(201).json({
+    id: bid.id,
+    tenderId: bid.tenderId,
+    freelancerId: bid.freelancerId,
+    price: bid.price,
+    deliveryDays: bid.deliveryDays,
+    message: bid.message ?? null,
+    isSelected: bid.isSelected,
+    createdAt: bid.createdAt,
   });
+});
 
-  export default router;
-  
+// ─── GET BIDS FOR A TENDER (buyer only) ───────────────────────────────────
+
+router.get("/tenders/:id/bids", extractUser, requireAuth, async (req, res): Promise<void> => {
+  const tenderId = parseInt(req.params.id, 10);
+  if (isNaN(tenderId) || tenderId <= 0) {
+    res.status(400).json({ error: "Invalid tender id" });
+    return;
+  }
+
+  const [tender] = await db.select().from(tendersTable).where(eq(tendersTable.id, tenderId));
+  if (!tender) {
+    res.status(404).json({ error: "Tender not found" });
+    return;
+  }
+  if (tender.buyerId !== req.userId) {
+    res.status(403).json({ error: "Only the tender author can view bids" });
+    return;
+  }
+
+  const rows = await db
+    .select({ bid: tenderBidsTable, freelancer: usersTable })
+    .from(tenderBidsTable)
+    .innerJoin(usersTable, eq(usersTable.id, tenderBidsTable.freelancerId))
+    .where(eq(tenderBidsTable.tenderId, tenderId))
+    .orderBy(tenderBidsTable.createdAt);
+
+  res.json({ items: rows.map((r) => bidWithFreelancer(r.bid, r.freelancer)) });
+});
+
+// ─── SELECT / ACCEPT BID (buyer only) ─────────────────────────────────────
+
+router.patch("/tenders/:id/select-bid/:bidId", extractUser, requireAuth, async (req, res): Promise<void> => {
+  const tenderId = parseInt(req.params.id, 10);
+  const bidId = parseInt(req.params.bidId, 10);
+  if (isNaN(tenderId) || tenderId <= 0 || isNaN(bidId) || bidId <= 0) {
+    res.status(400).json({ error: "Invalid ids" });
+    return;
+  }
+
+  const [tender] = await db.select().from(tendersTable).where(eq(tendersTable.id, tenderId));
+  if (!tender) {
+    res.status(404).json({ error: "Tender not found" });
+    return;
+  }
+  if (tender.buyerId !== req.userId) {
+    res.status(403).json({ error: "Only the tender author can accept bids" });
+    return;
+  }
+  if (tender.status !== "open") {
+    res.status(409).json({ error: `Cannot accept a bid on a tender with status '${tender.status}'` });
+    return;
+  }
+
+  const [bid] = await db.select().from(tenderBidsTable).where(
+    and(eq(tenderBidsTable.id, bidId), eq(tenderBidsTable.tenderId, tenderId))
+  );
+  if (!bid) {
+    res.status(404).json({ error: "Bid not found" });
+    return;
+  }
+
+  // Clear any previously selected bids
+  await db
+    .update(tenderBidsTable)
+    .set({ isSelected: false })
+    .where(eq(tenderBidsTable.tenderId, tenderId));
+
+  // Mark this bid as selected
+  const [selectedBid] = await db
+    .update(tenderBidsTable)
+    .set({ isSelected: true })
+    .where(eq(tenderBidsTable.id, bidId))
+    .returning();
+
+  // Advance tender to in_progress
+  const [updatedTender] = await db
+    .update(tendersTable)
+    .set({ status: "in_progress" })
+    .where(eq(tendersTable.id, tenderId))
+    .returning();
+
+  // Fetch freelancer info for response
+  const [freelancer] = await db.select().from(usersTable).where(eq(usersTable.id, bid.freelancerId));
+
+  res.json({
+    tender: {
+      id: updatedTender.id,
+      title: updatedTender.title,
+      status: updatedTender.status,
+    },
+    bid: bidWithFreelancer(selectedBid, freelancer),
+  });
+});
+
+export default router;

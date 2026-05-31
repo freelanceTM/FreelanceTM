@@ -32,6 +32,8 @@ import type {
   ListTendersParams,
   Message,
   MessageInput,
+  MyBid,
+  MyBidList,
   OnboardingInput,
   Order,
   OrderInput,
@@ -39,9 +41,12 @@ import type {
   PlatformStats,
   Review,
   ReviewInput,
+  SelectBidResult,
   Tender,
   TenderBid,
   TenderBidInput,
+  TenderBidList,
+  TenderBidWithFreelancer,
   TenderInput,
   TenderList,
   User,
@@ -2068,3 +2073,100 @@ export const useCreateTenderBid = <TError = ErrorType<unknown>, TContext = unkno
 ): UseMutationResult<Awaited<ReturnType<typeof createTenderBid>>, TError, { id: number; data: BodyType<TenderBidInput> }, TContext> => {
   return useMutation(getCreateTenderBidMutationOptions(options));
 };
+
+// ============================================================
+// TENDER BIDS (buyer view)
+// ============================================================
+
+export const getGetTenderBidsUrl = (tenderId: number) => `/api/tenders/${tenderId}/bids`;
+
+export const getTenderBids = async (tenderId: number, options?: RequestInit): Promise<TenderBidList> => {
+  return customFetch<TenderBidList>(getGetTenderBidsUrl(tenderId), { ...options });
+};
+
+export const getGetTenderBidsQueryKey = (tenderId: number) => [`/api/tenders/${tenderId}/bids`] as const;
+
+export const getGetTenderBidsQueryOptions = <TData = Awaited<ReturnType<typeof getTenderBids>>, TError = ErrorType<unknown>>(
+  tenderId: number,
+  options?: { query?: UseQueryOptions<Awaited<ReturnType<typeof getTenderBids>>, TError, TData>, request?: SecondParameter<typeof customFetch> }
+) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+  const queryKey = queryOptions?.queryKey ?? getGetTenderBidsQueryKey(tenderId);
+  const queryFn: QueryFunction<Awaited<ReturnType<typeof getTenderBids>>> = ({ signal }) => getTenderBids(tenderId, { signal, ...requestOptions });
+  return { queryKey, queryFn, enabled: tenderId > 0, ...queryOptions } as UseQueryOptions<Awaited<ReturnType<typeof getTenderBids>>, TError, TData> & { queryKey: QueryKey };
+};
+
+export function useGetTenderBids<TData = Awaited<ReturnType<typeof getTenderBids>>, TError = ErrorType<unknown>>(
+  tenderId: number,
+  options?: { query?: UseQueryOptions<Awaited<ReturnType<typeof getTenderBids>>, TError, TData>, request?: SecondParameter<typeof customFetch> }
+): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getGetTenderBidsQueryOptions(tenderId, options);
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & { queryKey: QueryKey };
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+// ============================================================
+// SELECT BID (buyer accepts a proposal)
+// ============================================================
+
+export const getSelectTenderBidUrl = (tenderId: number, bidId: number) => `/api/tenders/${tenderId}/select-bid/${bidId}`;
+
+export const selectTenderBid = async (tenderId: number, bidId: number, options?: RequestInit): Promise<SelectBidResult> => {
+  return customFetch<SelectBidResult>(getSelectTenderBidUrl(tenderId, bidId), {
+    ...options,
+    method: 'PATCH',
+  });
+};
+
+export const getSelectTenderBidMutationOptions = <TError = ErrorType<unknown>, TContext = unknown>(
+  options?: { mutation?: UseMutationOptions<Awaited<ReturnType<typeof selectTenderBid>>, TError, { tenderId: number; bidId: number }, TContext>, request?: SecondParameter<typeof customFetch> }
+): UseMutationOptions<Awaited<ReturnType<typeof selectTenderBid>>, TError, { tenderId: number; bidId: number }, TContext> => {
+  const mutationKey = ['selectTenderBid'];
+  const { mutation: mutationOptions, request: requestOptions } = options ?
+    options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+  const mutationFn: MutationFunction<Awaited<ReturnType<typeof selectTenderBid>>, { tenderId: number; bidId: number }> = (props) => {
+    const { tenderId, bidId } = props ?? {};
+    return selectTenderBid(tenderId, bidId, requestOptions);
+  };
+  return { mutationFn, ...mutationOptions };
+};
+
+export type SelectTenderBidMutationResult = NonNullable<Awaited<ReturnType<typeof selectTenderBid>>>;
+export type SelectTenderBidMutationError = ErrorType<unknown>;
+
+export const useSelectTenderBid = <TError = ErrorType<unknown>, TContext = unknown>(
+  options?: { mutation?: UseMutationOptions<Awaited<ReturnType<typeof selectTenderBid>>, TError, { tenderId: number; bidId: number }, TContext>, request?: SecondParameter<typeof customFetch> }
+): UseMutationResult<Awaited<ReturnType<typeof selectTenderBid>>, TError, { tenderId: number; bidId: number }, TContext> => {
+  return useMutation(getSelectTenderBidMutationOptions(options));
+};
+
+// ============================================================
+// MY BIDS (freelancer's submitted proposals)
+// ============================================================
+
+export const getGetMyBidsUrl = () => `/api/tenders/my-bids`;
+
+export const getMyBids = async (options?: RequestInit): Promise<MyBidList> => {
+  return customFetch<MyBidList>(getGetMyBidsUrl(), { ...options });
+};
+
+export const getGetMyBidsQueryKey = () => [`/api/tenders/my-bids`] as const;
+
+export const getGetMyBidsQueryOptions = <TData = Awaited<ReturnType<typeof getMyBids>>, TError = ErrorType<unknown>>(
+  options?: { query?: UseQueryOptions<Awaited<ReturnType<typeof getMyBids>>, TError, TData>, request?: SecondParameter<typeof customFetch> }
+) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+  const queryKey = queryOptions?.queryKey ?? getGetMyBidsQueryKey();
+  const queryFn: QueryFunction<Awaited<ReturnType<typeof getMyBids>>> = ({ signal }) => getMyBids({ signal, ...requestOptions });
+  return { queryKey, queryFn, ...queryOptions } as UseQueryOptions<Awaited<ReturnType<typeof getMyBids>>, TError, TData> & { queryKey: QueryKey };
+};
+
+export function useGetMyBids<TData = Awaited<ReturnType<typeof getMyBids>>, TError = ErrorType<unknown>>(
+  options?: { query?: UseQueryOptions<Awaited<ReturnType<typeof getMyBids>>, TError, TData>, request?: SecondParameter<typeof customFetch> }
+): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getGetMyBidsQueryOptions(options);
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & { queryKey: QueryKey };
+  return { ...query, queryKey: queryOptions.queryKey };
+}

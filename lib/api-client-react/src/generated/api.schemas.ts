@@ -459,3 +459,56 @@ export interface ListTendersParams {
   search?: string | null;
   page?: number | null;
 }
+
+export interface TenderBidWithFreelancer {
+  id: number;
+  tenderId: number;
+  freelancerId: number;
+  freelancerName: string;
+  /** @nullable */
+  freelancerAvatarUrl?: string | null;
+  /** @nullable */
+  freelancerLevel?: string | null;
+  /** @nullable */
+  freelancerRating?: number | null;
+  price: number;
+  deliveryDays: number;
+  /** @nullable */
+  message?: string | null;
+  isSelected: boolean;
+  createdAt?: string;
+}
+
+export interface TenderBidList {
+  items: TenderBidWithFreelancer[];
+}
+
+export interface MyBid {
+  id: number;
+  tenderId: number;
+  tenderTitle: string;
+  tenderBudget: number;
+  tenderStatus: TenderStatus;
+  /** @nullable */
+  categoryName?: string | null;
+  buyerName: string;
+  price: number;
+  deliveryDays: number;
+  /** @nullable */
+  message?: string | null;
+  isSelected: boolean;
+  createdAt?: string;
+}
+
+export interface MyBidList {
+  items: MyBid[];
+}
+
+export interface SelectBidResult {
+  tender: {
+    id: number;
+    title: string;
+    status: TenderStatus;
+  };
+  bid: TenderBidWithFreelancer;
+}
