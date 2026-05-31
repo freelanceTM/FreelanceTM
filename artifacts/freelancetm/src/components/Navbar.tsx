@@ -10,7 +10,8 @@ import {
   User,
   Wallet,
   LogOut,
-  LayoutDashboard
+  LayoutDashboard,
+  Plus,
 } from "lucide-react";
 import {
   DropdownMenu,
@@ -24,6 +25,7 @@ import { Sheet, SheetContent, SheetTrigger, SheetTitle } from "@/components/ui/s
 
 export function Navbar() {
   const { user, isAuthenticated, logout } = useAuth();
+  const isBuyer = isAuthenticated && user?.role === "buyer";
 
   return (
     <header className="sticky top-0 z-50 w-full border-b border-border/40 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
@@ -41,6 +43,15 @@ export function Navbar() {
             <Link href="/tenders" className="hover:text-foreground transition-colors">Exchange</Link>
             {isAuthenticated && (
               <Link href="/orders" className="hover:text-foreground transition-colors">My Orders</Link>
+            )}
+            {isBuyer && (
+              <Link
+                href="/tenders/new"
+                className="flex items-center gap-1 text-accent hover:text-accent/80 font-semibold transition-colors"
+              >
+                <Plus className="h-3.5 w-3.5" />
+                Post Request
+              </Link>
             )}
           </nav>
         </div>
@@ -135,6 +146,11 @@ export function Navbar() {
                     <>
                       <Link href="/orders" className="hover:text-primary transition-colors">My Orders</Link>
                       <Link href="/profile" className="hover:text-primary transition-colors">Profile & Wallet</Link>
+                      {isBuyer && (
+                        <Link href="/tenders/new" className="text-accent font-semibold hover:text-accent/80 transition-colors flex items-center gap-1">
+                          <Plus className="h-3.5 w-3.5" /> Post Request
+                        </Link>
+                      )}
                       <button onClick={logout} className="text-left text-destructive hover:text-destructive transition-colors">
                         Log out
                       </button>

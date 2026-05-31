@@ -2,6 +2,7 @@ import { Router, type IRouter } from "express";
 import { db, tendersTable, usersTable, categoriesTable } from "@workspace/db";
 import { eq, and, like, desc, count } from "drizzle-orm";
 import { ListTendersQueryParams, GetTenderParams, CreateTenderBody } from "@workspace/api-zod";
+import { extractUser, requireAuth } from "../middleware/auth";
 
 const router: IRouter = Router();
 
@@ -87,14 +88,14 @@ router.get("/tenders/:id", async (req, res): Promise<void> => {
   res.json(tenderWithDetails(row.tender, row.buyer, row.category));
 });
 
-router.post("/tenders", async (req, res): Promise<void> => {
+router.post("/tenders", extractUser, requireAuth, async (req, res): Promise<void> => {
   const parsed = CreateTenderBody.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: parsed.error.message });
     return;
   }
 
-  const buyerId = 1;
+  const buyerId = req.userId!;
   const [tender] = await db.insert(tendersTable).values({
     ...parsed.data,
     buyerId,

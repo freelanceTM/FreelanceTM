@@ -20,6 +20,7 @@ import Profile from "@/pages/Profile";
 import Login from "@/pages/Login";
 import Register from "@/pages/Register";
 import GigDetail from "@/pages/GigDetail";
+import TenderNew from "@/pages/TenderNew";
 
 function dispatch401() {
   window.dispatchEvent(new CustomEvent("ftm:unauthorized"));
@@ -51,6 +52,11 @@ function Router() {
       <Route path="/gigs/:id" component={GigDetail} />
       <Route path="/catalog" component={Catalog} />
       <Route path="/tenders" component={Tenders} />
+      <Route path="/tenders/new">
+        <ProtectedRoute>
+          <TenderNew />
+        </ProtectedRoute>
+      </Route>
       <Route path="/orders">
         <ProtectedRoute>
           <Orders />
