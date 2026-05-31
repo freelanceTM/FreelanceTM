@@ -1,164 +1,96 @@
 import { Router, type IRouter } from "express";
-import { eq } from "drizzle-orm";
-import { db, usersTable } from "@workspace/db";
-import {
-  GetUserParams,
-  GetUserResponse,
-  RegisterUserBody,
-  RegisterUserResponse,
-  UpdateMeBody,
-  UpdateMeResponse,
-  CompleteOnboardingBody,
-} from "@workspace/api-zod";
+import { db, usersTable, walletTransactionsTable } from "@workspace/db";
+import { eq, desc, sum } from "drizzle-orm";
+import { UpdateProfileBody } from "@workspace/api-zod";
 
 const router: IRouter = Router();
 
-function mapUser(user: typeof usersTable.$inferSelect) {
-  return {
-    ...user,
-    skills: user.skills ?? [],
-    portfolioUrls: user.portfolioUrls ?? [],
-    languages: user.languages ?? ["ru"],
-    createdAt: user.createdAt.toISOString(),
-    lastActiveAt: user.lastActiveAt.toISOString(),
-    isVerified: user.isVerified ?? false,
-    onboardingCompleted: user.onboardingCompleted ?? false,
-    level: user.level ?? "new",
-    country: user.country ?? "TM",
-  };
-}
+const DEMO_USER_ID = 1;
 
-router.get("/users/me", async (req, res): Promise<void> => {
-  const userId = req.headers["x-user-id"];
-  if (!userId) {
-    res.status(401).json({ error: "Unauthorized" });
-    return;
-  }
-  const id = parseInt(String(userId), 10);
-  const [user] = await db.select().from(usersTable).where(eq(usersTable.id, id));
+router.get("/users/me", async (_req, res): Promise<void> => {
+  const [user] = await db.select().from(usersTable).where(eq(usersTable.id, DEMO_USER_ID));
+
   if (!user) {
-    res.status(401).json({ error: "User not found" });
+    res.status(404).json({ error: "User not found" });
     return;
   }
 
-  // Update last active
-  await db.update(usersTable).set({ lastActiveAt: new Date() }).where(eq(usersTable.id, id));
-
-  res.json(GetUserResponse.parse(mapUser(user)));
+  res.json({
+    id: user.id,
+    username: user.username,
+    email: user.email,
+    role: user.role,
+    displayName: user.displayName,
+    bio: user.bio,
+    avatarUrl: user.avatarUrl,
+    location: user.location,
+    skills: user.skills,
+    rating: user.rating,
+    reviewCount: user.reviewCount,
+    completedOrders: user.completedOrders,
+    memberSince: user.createdAt,
+  });
 });
 
 router.patch("/users/me", async (req, res): Promise<void> => {
-  const userId = req.headers["x-user-id"];
-  if (!userId) {
-    res.status(401).json({ error: "Unauthorized" });
-    return;
-  }
-  const id = parseInt(String(userId), 10);
-
-  const parsed = UpdateMeBody.safeParse(req.body);
+  const parsed = UpdateProfileBody.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: parsed.error.message });
     return;
   }
 
-  const updateData: Record<string, unknown> = {};
-  if (parsed.data.displayName !== undefined) updateData.displayName = parsed.data.displayName;
-  if (parsed.data.bio !== undefined) updateData.bio = parsed.data.bio;
-  if (parsed.data.avatarUrl !== undefined) updateData.avatarUrl = parsed.data.avatarUrl;
-  if (parsed.data.skills !== undefined) updateData.skills = parsed.data.skills;
-  if (parsed.data.telegramUsername !== undefined) updateData.telegramUsername = parsed.data.telegramUsername;
-  if (parsed.data.role !== undefined) updateData.role = parsed.data.role;
-  if (parsed.data.portfolioUrls !== undefined) updateData.portfolioUrls = parsed.data.portfolioUrls;
-  if (parsed.data.languages !== undefined) updateData.languages = parsed.data.languages;
-  if (parsed.data.country !== undefined) updateData.country = parsed.data.country;
+  const [user] = await db
+    .update(usersTable)
+    .set({
+      displayName: parsed.data.displayName,
+      bio: parsed.data.bio,
+      location: parsed.data.location,
+      skills: parsed.data.skills,
+      avatarUrl: parsed.data.avatarUrl,
+    })
+    .where(eq(usersTable.id, DEMO_USER_ID))
+    .returning();
 
-  const [user] = await db.update(usersTable).set(updateData).where(eq(usersTable.id, id)).returning();
-  if (!user) {
-    res.status(404).json({ error: "User not found" });
-    return;
-  }
-  res.json(UpdateMeResponse.parse(mapUser(user)));
+  res.json({
+    id: user.id,
+    username: user.username,
+    email: user.email,
+    role: user.role,
+    displayName: user.displayName,
+    bio: user.bio,
+    avatarUrl: user.avatarUrl,
+    location: user.location,
+    skills: user.skills,
+    rating: user.rating,
+    reviewCount: user.reviewCount,
+    completedOrders: user.completedOrders,
+    memberSince: user.createdAt,
+  });
 });
 
-router.post("/users/me/onboarding", async (req, res): Promise<void> => {
-  const userId = req.headers["x-user-id"];
-  if (!userId) {
-    res.status(401).json({ error: "Unauthorized" });
-    return;
-  }
-  const id = parseInt(String(userId), 10);
+router.get("/users/me/wallet", async (_req, res): Promise<void> => {
+  const transactions = await db
+    .select()
+    .from(walletTransactionsTable)
+    .where(eq(walletTransactionsTable.userId, DEMO_USER_ID))
+    .orderBy(desc(walletTransactionsTable.createdAt))
+    .limit(20);
 
-  const parsed = CompleteOnboardingBody.safeParse(req.body);
-  if (!parsed.success) {
-    res.status(400).json({ error: parsed.error.message });
-    return;
-  }
+  const balance = transactions.reduce((acc, tx) => {
+    return tx.type === "credit" ? acc + tx.amount : acc - tx.amount;
+  }, 0);
 
-  const updateData: Record<string, unknown> = {
-    onboardingCompleted: true,
-    role: parsed.data.role as "freelancer" | "client" | "both",
-  };
-  if (parsed.data.displayName) updateData.displayName = parsed.data.displayName;
-  if (parsed.data.bio) updateData.bio = parsed.data.bio;
-  if (parsed.data.skills) updateData.skills = parsed.data.skills;
-  if (parsed.data.telegramUsername) updateData.telegramUsername = parsed.data.telegramUsername;
-  if (parsed.data.portfolioUrls) updateData.portfolioUrls = parsed.data.portfolioUrls;
-  if (parsed.data.languages) updateData.languages = parsed.data.languages;
-
-  const [user] = await db.update(usersTable).set(updateData).where(eq(usersTable.id, id)).returning();
-  if (!user) {
-    res.status(404).json({ error: "User not found" });
-    return;
-  }
-  res.json(mapUser(user));
-});
-
-router.get("/users/:userId", async (req, res): Promise<void> => {
-  const params = GetUserParams.safeParse(req.params);
-  if (!params.success) {
-    res.status(400).json({ error: params.error.message });
-    return;
-  }
-  const [user] = await db.select().from(usersTable).where(eq(usersTable.id, params.data.userId));
-  if (!user) {
-    res.status(404).json({ error: "User not found" });
-    return;
-  }
-  res.json(GetUserResponse.parse(mapUser(user)));
-});
-
-router.post("/users/register", async (req, res): Promise<void> => {
-  const parsed = RegisterUserBody.safeParse(req.body);
-  if (!parsed.success) {
-    res.status(400).json({ error: parsed.error.message });
-    return;
-  }
-
-  const existing = await db.select().from(usersTable).where(eq(usersTable.email, parsed.data.email));
-  if (existing.length > 0) {
-    const user = existing[0];
-    // Update lastActiveAt on login
-    await db.update(usersTable).set({ lastActiveAt: new Date() }).where(eq(usersTable.id, user.id));
-    res.json(RegisterUserResponse.parse(mapUser(user)));
-    return;
-  }
-
-  const [user] = await db.insert(usersTable).values({
-    username: parsed.data.username,
-    email: parsed.data.email,
-    displayName: parsed.data.displayName ?? parsed.data.username,
-    role: (parsed.data.role as "freelancer" | "client" | "both") ?? "client",
-    skills: [],
-    portfolioUrls: [],
-    languages: ["ru"],
-    completedOrders: 0,
-    isVerified: false,
-    onboardingCompleted: false,
-    level: "new",
-    country: "TM",
-  }).returning();
-
-  res.json(RegisterUserResponse.parse(mapUser(user)));
+  res.json({
+    balance: Math.round(balance * 100) / 100,
+    currency: "USD",
+    transactions: transactions.map((tx) => ({
+      id: tx.id,
+      amount: tx.amount,
+      type: tx.type,
+      description: tx.description,
+      createdAt: tx.createdAt,
+    })),
+  });
 });
 
 export default router;
