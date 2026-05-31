@@ -1,5 +1,5 @@
 import { Router, type IRouter } from "express";
-import { db, usersTable, topupRequestsTable } from "@workspace/db";
+import { db, usersTable, topupRequestsTable, payoutRequestsTable } from "@workspace/db";
 import { eq, desc, sql } from "drizzle-orm";
 import { extractUser, requireAuth } from "../middleware/auth";
 import crypto from "crypto";
@@ -19,13 +19,11 @@ const UPLOADS_DIR = path.join(
 fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 
 // ─── Mock OCR ────────────────────────────────────────────────────────────────
-// MVP: always returns "verified". Replace with real Tesseract / Google Vision later.
 function mockOcr(_imageBuffer: Buffer): { status: "verified" | "failed"; confidence: number } {
   return { status: "verified", confidence: 1.0 };
 }
 
 // ─── POST /wallet/topup ───────────────────────────────────────────────────────
-// Body (JSON): { amount: number, screenshot?: { data: string (dataURL), name: string } }
 router.post("/wallet/topup", extractUser, requireAuth, async (req, res): Promise<void> => {
   const { amount, screenshot } = req.body as {
     amount?: number;
@@ -40,7 +38,6 @@ router.post("/wallet/topup", extractUser, requireAuth, async (req, res): Promise
   const userId = req.userId!;
   const numAmount = Number(amount);
 
-  // ── Save screenshot if provided ───────────────────────────────────────────
   let screenshotUrl: string | null = null;
   let imageBuffer: Buffer | null = null;
 
@@ -55,12 +52,9 @@ router.post("/wallet/topup", extractUser, requireAuth, async (req, res): Promise
     }
   }
 
-  // ── Mock OCR ───────────────────────────────────────────────────────────────
   const ocr = imageBuffer ? mockOcr(imageBuffer) : { status: "verified" as const, confidence: 0 };
 
-  // ── SECURITY FIX: credit pendingBalance only — NOT the spendable balance ──
-  // The main `balance` is only touched by an admin approve action.
-  // This prevents malicious users from spending funds before admin review.
+  // SECURITY: credit pendingBalance only — balance touched only on admin approval
   if (ocr.status === "verified") {
     await db
       .update(usersTable)
@@ -68,7 +62,6 @@ router.post("/wallet/topup", extractUser, requireAuth, async (req, res): Promise
       .where(eq(usersTable.id, userId));
   }
 
-  // ── Save topup request for admin review ───────────────────────────────────
   const [topup] = await db
     .insert(topupRequestsTable)
     .values({
@@ -91,7 +84,7 @@ router.post("/wallet/topup", extractUser, requireAuth, async (req, res): Promise
   });
 });
 
-// ─── GET /wallet/topups — user's own topup history ──────────────────────────
+// ─── GET /wallet/topups ───────────────────────────────────────────────────────
 router.get("/wallet/topups", extractUser, requireAuth, async (req, res): Promise<void> => {
   const userId = req.userId!;
   const topups = await db
@@ -101,6 +94,72 @@ router.get("/wallet/topups", extractUser, requireAuth, async (req, res): Promise
     .orderBy(desc(topupRequestsTable.createdAt));
 
   res.json({ items: topups });
+});
+
+// ─── POST /wallet/payout ──────────────────────────────────────────────────────
+// Accepts { amount, phoneNumber }. Atomically deducts from spendable balance
+// and creates a pending payout_request for admin review.
+// MVP: mobile phone transfers ONLY (no bank cards).
+router.post("/wallet/payout", extractUser, requireAuth, async (req, res): Promise<void> => {
+  const { amount, phoneNumber } = req.body as { amount?: number; phoneNumber?: string };
+
+  if (!amount || isNaN(Number(amount)) || Number(amount) <= 0) {
+    res.status(400).json({ error: "amount must be a positive number" });
+    return;
+  }
+  if (!phoneNumber || typeof phoneNumber !== "string" || phoneNumber.trim().length < 8) {
+    res.status(400).json({ error: "phoneNumber is required (mobile transfer)" });
+    return;
+  }
+
+  const userId = req.userId!;
+  const numAmount = Number(amount);
+  const phone = phoneNumber.trim();
+
+  // Atomic: check balance and deduct in one transaction
+  const [payout] = await db.transaction(async (tx) => {
+    const [user] = await tx
+      .select({ balance: usersTable.balance })
+      .from(usersTable)
+      .where(eq(usersTable.id, userId));
+
+    if (!user || (user.balance ?? 0) < numAmount) {
+      throw new Error("INSUFFICIENT_BALANCE");
+    }
+
+    await tx
+      .update(usersTable)
+      .set({ balance: sql`COALESCE(balance, 0) - ${numAmount}` })
+      .where(eq(usersTable.id, userId));
+
+    return tx
+      .insert(payoutRequestsTable)
+      .values({ userId, amount: numAmount, phoneNumber: phone, status: "pending" })
+      .returning();
+  }).catch((err) => {
+    if (err.message === "INSUFFICIENT_BALANCE") {
+      res.status(400).json({ error: "Insufficient balance" });
+    } else {
+      res.status(500).json({ error: "Internal error" });
+    }
+    return null;
+  });
+
+  if (!payout) return;
+
+  res.status(201).json(payout);
+});
+
+// ─── GET /wallet/payouts ──────────────────────────────────────────────────────
+router.get("/wallet/payouts", extractUser, requireAuth, async (req, res): Promise<void> => {
+  const userId = req.userId!;
+  const payouts = await db
+    .select()
+    .from(payoutRequestsTable)
+    .where(eq(payoutRequestsTable.userId, userId))
+    .orderBy(desc(payoutRequestsTable.createdAt));
+
+  res.json({ items: payouts });
 });
 
 export default router;

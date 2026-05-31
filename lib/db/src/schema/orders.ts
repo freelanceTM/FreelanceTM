@@ -1,4 +1,4 @@
-import { pgTable, text, serial, integer, real, timestamp, pgEnum } from "drizzle-orm/pg-core";
+import { pgTable, text, serial, integer, real, timestamp, pgEnum, boolean } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod/v4";
 import { usersTable } from "./users";
@@ -19,6 +19,7 @@ export const ordersTable = pgTable("orders", {
   sellerId: integer("seller_id").notNull().references(() => usersTable.id),
   price: real("price").notNull(),
   status: orderStatusEnum("status").notNull().default("active"),
+  isDisputed: boolean("is_disputed").notNull().default(false),
   deliveryDays: integer("delivery_days").notNull(),
   dueDate: timestamp("due_date", { withTimezone: true }),
   deliveryNote: text("delivery_note"),

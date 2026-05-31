@@ -17,8 +17,6 @@ function orderWithDetails(
     gigId: order.gigId ?? null,
     tenderId: order.tenderId ?? null,
     tenderBidId: order.tenderBidId ?? null,
-    // For tender orders, gigTitle surfaces the tender title so the Orders UI
-    // works without any frontend changes.
     gigTitle: gig?.title ?? tender?.title ?? "Contract",
     gigImageUrl: gig?.imageUrl ?? null,
     isTenderOrder: order.gigId === null,
@@ -28,6 +26,7 @@ function orderWithDetails(
     sellerName: seller.displayName ?? seller.username,
     price: order.price,
     status: order.status,
+    isDisputed: order.isDisputed,
     deliveryDays: order.deliveryDays,
     dueDate: order.dueDate ?? null,
     deliveryNote: order.deliveryNote ?? null,
@@ -156,6 +155,38 @@ router.patch("/orders/:id/status", extractUser, requireAuth, async (req, res): P
   res.json(await enrichOrder(updated));
 });
 
+// ─── OPEN DISPUTE ─────────────────────────────────────────────────────────────
+// Either party (buyer or seller) can flag an active/delivered order as disputed.
+// Does NOT change order.status — admin resolves via PATCH /api/admin/orders/:id/resolve.
+
+router.patch("/orders/:id/dispute", extractUser, requireAuth, async (req, res): Promise<void> => {
+  const orderId = parseInt(req.params.id, 10);
+  if (isNaN(orderId) || orderId <= 0) {
+    res.status(400).json({ error: "Invalid order id" });
+    return;
+  }
+
+  const userId = req.userId!;
+  const [order] = await db.select().from(ordersTable).where(eq(ordersTable.id, orderId));
+  if (!order) { res.status(404).json({ error: "Order not found" }); return; }
+  if (order.buyerId !== userId && order.sellerId !== userId) {
+    res.status(403).json({ error: "Access denied" }); return;
+  }
+  if (!["active", "delivered", "revision"].includes(order.status)) {
+    res.status(400).json({ error: "Can only dispute active or delivered orders" }); return;
+  }
+  if (order.isDisputed) {
+    res.status(400).json({ error: "Order is already under dispute" }); return;
+  }
+
+  const [updated] = await db
+    .update(ordersTable)
+    .set({ isDisputed: true })
+    .where(eq(ordersTable.id, orderId))
+    .returning();
+
+  res.json(await enrichOrder(updated));
+});
 
 // ─── CREATE ORDER ─────────────────────────────────────────────────────────────
 
@@ -191,6 +222,7 @@ router.post('/orders', extractUser, requireAuth, async (req, res): Promise<void>
       sellerId: gig.sellerId,
       price: gig.price,
       status: 'active',
+      isDisputed: false,
       deliveryDays: gig.deliveryDays,
       dueDate,
       deliveryNote: requirements ?? null,
@@ -201,7 +233,3 @@ router.post('/orders', extractUser, requireAuth, async (req, res): Promise<void>
 });
 
 export default router;
-
-// ─── CREATE ORDER (POST /orders) ──────────────────────────────────────────────
-// Inserted before the file's export via append; router picks up routes in order.
-// Called by useCreateOrder() hook on the gig detail page.

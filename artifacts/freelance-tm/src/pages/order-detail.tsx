@@ -48,6 +48,7 @@ export default function OrderDetail({ params }: { params: { id: string } }) {
   const [reviewRating, setReviewRating] = useState(5);
   const [reviewComment, setReviewComment] = useState("");
   const [hoverRating, setHoverRating] = useState(0);
+  const [disputeLoading, setDisputeLoading] = useState(false);
 
   // Socket.IO for real-time chat
   const { connected, lastMessage, sendMessage: sendSocketMessage, markRead } = useSocket(id);
@@ -196,6 +197,24 @@ export default function OrderDetail({ params }: { params: { id: string } }) {
     handleStatus("revision" as OrderStatusUpdateStatus, note);
     setShowRevisionDialog(false);
     setRevisionNote("");
+  };
+
+  const handleDispute = async () => {
+    const tok = JSON.parse(localStorage.getItem("ftm_tokens") || "{}").accessToken || "";
+    setDisputeLoading(true);
+    try {
+      const res = await fetch(`${import.meta.env.VITE_API_URL || ""}/api/orders/${id}/dispute`, {
+        method: "PATCH",
+        headers: { Authorization: `Bearer ${tok}` },
+      });
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || "Ошибка");
+      toast({ title: "Спор открыт", description: "Администратор рассмотрит ситуацию и примет решение." });
+      invalidate();
+    } catch (err: any) {
+      toast({ title: err.message, variant: "destructive" });
+    } finally {
+      setDisputeLoading(false);
+    }
   };
 
   const handleSubmitReview = (e: React.FormEvent) => {
@@ -469,15 +488,6 @@ export default function OrderDetail({ params }: { params: { id: string } }) {
                       <RefreshCw className="w-4 h-4" />
                       Запросить правку
                     </Button>
-                    <Button
-                      variant="ghost"
-                      className="w-full gap-2 text-orange-400 hover:text-orange-300 text-sm"
-                      onClick={() => handleStatus("disputed")}
-                      disabled={updateStatus.isPending}
-                    >
-                      <AlertTriangle className="w-3.5 h-3.5" />
-                      Открыть спор
-                    </Button>
                   </div>
                 )}
 
@@ -514,9 +524,27 @@ export default function OrderDetail({ params }: { params: { id: string } }) {
                   </div>
                 )}
 
-                {order.status === "disputed" && (
-                  <div className="p-3 bg-orange-500/10 border border-orange-500/20 rounded-lg text-center text-sm text-orange-400">
-                    Открыт спор — служба поддержки рассмотрит ситуацию
+                {/* DISPUTE BUTTON — visible to both parties on active/delivered/revision orders */}
+                {(isBuyer || isSeller) &&
+                  ["active", "delivered", "revision"].includes(order.status) &&
+                  !(order as any).isDisputed && (
+                  <Button
+                    variant="ghost"
+                    className="w-full gap-2 text-orange-400 hover:text-orange-300 hover:bg-orange-500/10 text-sm border border-orange-500/20 mt-1"
+                    onClick={handleDispute}
+                    disabled={disputeLoading || updateStatus.isPending}
+                  >
+                    <AlertTriangle className="w-3.5 h-3.5" />
+                    {disputeLoading ? "Открываем спор..." : "Открыть спор"}
+                  </Button>
+                )}
+
+                {/* DISPUTE ACTIVE STATE */}
+                {(order as any).isDisputed && (
+                  <div className="p-3 bg-orange-500/10 border border-orange-500/30 rounded-lg text-center text-sm text-orange-400">
+                    <AlertTriangle className="w-4 h-4 mx-auto mb-1" />
+                    <div className="font-medium">Открыт спор</div>
+                    <div className="text-xs text-orange-400/70 mt-0.5">Администратор рассматривает ситуацию</div>
                   </div>
                 )}
               </CardContent>
