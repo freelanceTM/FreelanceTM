@@ -3,7 +3,7 @@ import { useAuth } from "@/hooks/use-auth";
 import { useI18n } from "@/lib/i18n";
 import { LangSwitcher } from "@/components/lang-switcher";
 import { Button } from "@/components/ui/button";
-import { LayoutDashboard, LogIn, LogOut, Plus, Search, Heart, Menu, X, Home, BookOpen, User } from "lucide-react";
+import { LayoutDashboard, LogIn, LogOut, Plus, Search, Heart, Menu, X, Home, BookOpen, User, ClipboardList } from "lucide-react";
 import { ReactNode, useEffect, useState } from "react";
 
 export function Layout({ children }: { children: ReactNode }) {
@@ -24,7 +24,7 @@ export function Layout({ children }: { children: ReactNode }) {
   const bottomNavItems = [
     { href: "/", icon: Home, label: "Главная" },
     { href: "/gigs", icon: Search, label: "Каталог" },
-    { href: "/dashboard", icon: LayoutDashboard, label: "Заказы" },
+    { href: "/orders", icon: ClipboardList, label: "Заказы" },
     { href: isAuthenticated && user ? `/profile/${user.id}` : "/login", icon: User, label: "Профиль" },
   ];
 
@@ -72,6 +72,12 @@ export function Layout({ children }: { children: ReactNode }) {
                 <Link href="/favorites">
                   <Button variant="ghost" size="icon" title="Избранное" className="text-muted-foreground hover:text-red-400">
                     <Heart className="w-4 h-4" />
+                  </Button>
+                </Link>
+                <Link href="/orders">
+                  <Button variant="ghost" size="sm" className="gap-2">
+                    <ClipboardList className="w-4 h-4" />
+                    <span>My Orders</span>
                   </Button>
                 </Link>
                 <Link href="/dashboard">
@@ -150,6 +156,12 @@ export function Layout({ children }: { children: ReactNode }) {
                       </div>
                     </Link>
                   )}
+                  <Link href="/orders">
+                    <div className={`flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${location === "/orders" ? "bg-primary/10 text-primary" : "hover:bg-white/5 text-muted-foreground"}`}>
+                      <ClipboardList className="w-4 h-4" />
+                      My Orders
+                    </div>
+                  </Link>
                   <Link href="/favorites">
                     <div className="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium hover:bg-white/5 text-muted-foreground transition-colors">
                       <Heart className="w-4 h-4" />

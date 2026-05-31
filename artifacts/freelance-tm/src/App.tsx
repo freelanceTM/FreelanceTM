@@ -14,6 +14,7 @@ import Dashboard from "@/pages/dashboard";
 import Profile from "@/pages/profile";
 import CreateGig from "@/pages/create-gig";
 import OrderDetail from "@/pages/order-detail";
+import Orders from "@/pages/orders";
 import Onboarding from "@/pages/onboarding";
 import Favorites from "@/pages/favorites";
 import HowItWorks from "@/pages/how-it-works";
@@ -37,6 +38,7 @@ function Router() {
       <Route path="/dashboard" component={Dashboard} />
       <Route path="/profile/:userId" component={Profile} />
       <Route path="/create-gig" component={CreateGig} />
+      <Route path="/orders" component={Orders} />
       <Route path="/orders/:id" component={OrderDetail} />
       <Route path="/onboarding" component={Onboarding} />
       <Route path="/favorites" component={Favorites} />

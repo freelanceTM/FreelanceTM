@@ -140,7 +140,7 @@ const translations = {
       finish: "Готово",
       skip: "Пропустить",
     },
-    status: { pending: "Ожидает", active: "В работе", delivered: "Сдан", completed: "Завершён", cancelled: "Отменён", disputed: "Спор" },
+    status: { pending: "Ожидает", active: "В работе", delivered: "Сдан", completed: "Завершён", revision: "Правка", cancelled: "Отменён", disputed: "Спор" },
     trust: { verified: "Верифицирован", level: "Уровень", responseTime: "Ответит за", hours: "ч", completedOrders: "заказов" },
     common: { loading: "Загрузка...", error: "Ошибка", notFound: "Не найдено", save: "Сохранить", cancel: "Отмена", confirm: "Подтвердить", from: "от" },
   },
@@ -279,7 +279,7 @@ const translations = {
       finish: "Taýyn",
       skip: "Geç",
     },
-    status: { pending: "Garaşýar", active: "Işde", delivered: "Tabşyryldy", completed: "Tamamlandy", cancelled: "Ýatyryldy", disputed: "Jedel" },
+    status: { pending: "Garaşýar", active: "Işde", delivered: "Tabşyryldy", completed: "Tamamlandy", revision: "Düzeltme", cancelled: "Ýatyryldy", disputed: "Jedel" },
     trust: { verified: "Tassyklanan", level: "Dereje", responseTime: "Jogap wagty", hours: "s", completedOrders: "sargyt" },
     common: { loading: "Ýüklenýär...", error: "Ýalňyşlyk", notFound: "Tapylmady", save: "Sakla", cancel: "Ýatyr", confirm: "Tassykla", from: "dan" },
   },
@@ -418,7 +418,7 @@ const translations = {
       finish: "Finish",
       skip: "Skip",
     },
-    status: { pending: "Pending", active: "In Progress", delivered: "Delivered", completed: "Completed", cancelled: "Cancelled", disputed: "Disputed" },
+    status: { pending: "Pending", active: "In Progress", delivered: "Delivered", completed: "Completed", revision: "Revision Requested", cancelled: "Cancelled", disputed: "Disputed" },
     trust: { verified: "Verified", level: "Level", responseTime: "Responds in", hours: "h", completedOrders: "orders" },
     common: { loading: "Loading...", error: "Error", notFound: "Not Found", save: "Save", cancel: "Cancel", confirm: "Confirm", from: "from" },
   },
@@ -439,7 +439,7 @@ export type Translations = {
   dashboard: { welcome: string; subtitle: string; postGig: string; myOrders: string; mySales: string; myGigs: string; noOrders: string; noOrdersSub: string; browseServices: string; noSales: string; noSalesSub: string; noGigs: string; noGigsSub: string; createFirst: string; viewOrder: string; manageOrder: string; earnings: string; totalRevenue: string; activeOrders: string; rating: string };
   login: { title: string; sub: string; signIn: string; signUp: string; username: string; email: string; chooseRole: string; client: string; freelancer: string; both: string; haveAccount: string; noAccount: string; continue: string };
   onboarding: { title: string; sub: string; step1: string; step2: string; step3: string; role: string; displayName: string; bio: string; bioPlaceholder: string; telegram: string; skills: string; skillsPlaceholder: string; portfolio: string; portfolioPlaceholder: string; next: string; back: string; finish: string; skip: string };
-  status: { pending: string; active: string; delivered: string; completed: string; cancelled: string; disputed: string };
+  status: { pending: string; active: string; delivered: string; completed: string; revision: string; cancelled: string; disputed: string };
   trust: { verified: string; level: string; responseTime: string; hours: string; completedOrders: string };
   common: { loading: string; error: string; notFound: string; save: string; cancel: string; confirm: string; from: string };
 };

@@ -108,12 +108,43 @@ router.patch("/orders/:id/status", extractUser, requireAuth, async (req, res): P
     return;
   }
 
+  const userId = req.userId!;
+  const [order] = await db.select().from(ordersTable).where(eq(ordersTable.id, orderId));
+  if (!order) {
+    res.status(404).json({ error: "Order not found" });
+    return;
+  }
+  if (order.buyerId !== userId && order.sellerId !== userId) {
+    res.status(403).json({ error: "Access denied" });
+    return;
+  }
+
+  const isBuyer = order.buyerId === userId;
+  const isSeller = order.sellerId === userId;
+
+  if (status === "delivered" && !isSeller) {
+    res.status(403).json({ error: "Only the seller can mark an order as delivered" });
+    return;
+  }
+  if (status === "completed" && !isBuyer) {
+    res.status(403).json({ error: "Only the buyer can complete an order" });
+    return;
+  }
+  if (status === "revision" && !isBuyer) {
+    res.status(403).json({ error: "Only the buyer can request a revision" });
+    return;
+  }
+
+  const setData: Partial<typeof ordersTable.$inferInsert> = {
+    status: status as typeof validStatuses[number],
+  };
+  if (status === "delivered" || status === "revision") {
+    setData.deliveryNote = note ?? null;
+  }
+
   const [updated] = await db
     .update(ordersTable)
-    .set({
-      status: status as typeof validStatuses[number],
-      deliveryNote: note ?? null,
-    })
+    .set(setData)
     .where(eq(ordersTable.id, orderId))
     .returning();
 

@@ -43,6 +43,8 @@ export default function OrderDetail({ params }: { params: { id: string } }) {
   const [deliveryNote, setDeliveryNote] = useState("");
   const [showDeliverDialog, setShowDeliverDialog] = useState(false);
   const [showReviewDialog, setShowReviewDialog] = useState(false);
+  const [showRevisionDialog, setShowRevisionDialog] = useState(false);
+  const [revisionNote, setRevisionNote] = useState("");
   const [reviewRating, setReviewRating] = useState(5);
   const [reviewComment, setReviewComment] = useState("");
   const [hoverRating, setHoverRating] = useState(0);
@@ -142,6 +144,7 @@ export default function OrderDetail({ params }: { params: { id: string } }) {
       cancelled: "Заказ отменён",
       delivered: "Работа сдана покупателю",
       completed: "Заказ завершён",
+      revision: "Запрошена правка — исполнитель уведомлён",
     };
     return map[s] ?? "Статус обновлён";
   };
@@ -168,35 +171,31 @@ export default function OrderDetail({ params }: { params: { id: string } }) {
     }
   };
 
-  const handleStatus = (newStatus: OrderStatusUpdateStatus) => {
-    updateStatus.mutate({ orderId: id, data: { status: newStatus } });
+  const handleStatus = (newStatus: OrderStatusUpdateStatus, note?: string) => {
+    updateStatus.mutate({ orderId: id, data: { status: newStatus, note } });
   };
 
   const handleDeliver = (e: React.FormEvent) => {
     e.preventDefault();
-    if (deliveryNote.trim()) {
+    const note = deliveryNote.trim() || undefined;
+    if (note) {
       if (connected) {
-        sendSocketMessage(`📦 Работа сдана:\n\n${deliveryNote}`);
+        sendSocketMessage(`📦 Работа сдана:\n\n${note}`);
       } else {
-        sendMessageRest.mutate(
-          { orderId: id, data: { content: `📦 Работа сдана:\n\n${deliveryNote}` } },
-          {
-            onSuccess: () => {
-              handleStatus("delivered");
-              setShowDeliverDialog(false);
-              setDeliveryNote("");
-            },
-          }
-        );
-        return;
+        sendMessageRest.mutate({ orderId: id, data: { content: `📦 Работа сдана:\n\n${note}` } });
       }
-      handleStatus("delivered");
-      setShowDeliverDialog(false);
-      setDeliveryNote("");
-    } else {
-      handleStatus("delivered");
-      setShowDeliverDialog(false);
     }
+    handleStatus("delivered", note);
+    setShowDeliverDialog(false);
+    setDeliveryNote("");
+  };
+
+  const handleRevision = (e: React.FormEvent) => {
+    e.preventDefault();
+    const note = revisionNote.trim() || undefined;
+    handleStatus("revision" as OrderStatusUpdateStatus, note);
+    setShowRevisionDialog(false);
+    setRevisionNote("");
   };
 
   const handleSubmitReview = (e: React.FormEvent) => {
@@ -243,6 +242,7 @@ export default function OrderDetail({ params }: { params: { id: string } }) {
   const statusFlow = [
     { key: "pending", label: "Ожидает" },
     { key: "active", label: "В работе" },
+    { key: "revision", label: "Правка" },
     { key: "delivered", label: "Сдан" },
     { key: "completed", label: "Завершён" },
   ];
@@ -413,16 +413,24 @@ export default function OrderDetail({ params }: { params: { id: string } }) {
                   </>
                 )}
 
-                {/* SELLER: active → deliver */}
-                {isSeller && order.status === "active" && (
+                {/* SELLER: active or revision → deliver */}
+                {isSeller && (order.status === "active" || order.status === "revision") && (
                   <Button
                     className="w-full gap-2"
                     onClick={() => setShowDeliverDialog(true)}
                     disabled={updateStatus.isPending}
                   >
                     <PackageCheck className="w-4 h-4" />
-                    Сдать работу
+                    {order.status === "revision" ? "Сдать правку" : "Сдать работу"}
                   </Button>
+                )}
+
+                {/* SELLER: revision status info */}
+                {isSeller && order.status === "revision" && order.deliveryNote && (
+                  <div className="p-3 bg-purple-500/10 border border-purple-500/20 rounded-lg text-xs text-purple-300">
+                    <div className="font-semibold mb-1">Требование покупателя:</div>
+                    <div className="whitespace-pre-wrap">{order.deliveryNote}</div>
+                  </div>
                 )}
 
                 {/* BUYER: pending → cancel */}
@@ -454,8 +462,8 @@ export default function OrderDetail({ params }: { params: { id: string } }) {
                     </Button>
                     <Button
                       variant="outline"
-                      className="w-full gap-2 border-white/10"
-                      onClick={() => handleStatus("active")}
+                      className="w-full gap-2 border-purple-500/30 text-purple-400 hover:bg-purple-500/10"
+                      onClick={() => { setRevisionNote(""); setShowRevisionDialog(true); }}
                       disabled={updateStatus.isPending}
                     >
                       <RefreshCw className="w-4 h-4" />
@@ -470,6 +478,13 @@ export default function OrderDetail({ params }: { params: { id: string } }) {
                       <AlertTriangle className="w-3.5 h-3.5" />
                       Открыть спор
                     </Button>
+                  </div>
+                )}
+
+                {/* BUYER: revision requested state */}
+                {isBuyer && order.status === "revision" && (
+                  <div className="p-3 bg-purple-500/10 border border-purple-500/20 rounded-lg text-xs text-purple-300 text-center">
+                    Правка запрошена — ожидайте исполнителя
                   </div>
                 )}
 
@@ -544,6 +559,30 @@ export default function OrderDetail({ params }: { params: { id: string } }) {
               </CardContent>
             </Card>
 
+            {/* Delivery / Revision note card */}
+            {order.deliveryNote && (
+              <Card className={`border ${
+                order.status === "revision"
+                  ? "bg-purple-500/5 border-purple-500/20"
+                  : "bg-green-500/5 border-green-500/20"
+              }`}>
+                <CardContent className="p-4 space-y-1">
+                  <h4 className={`font-semibold text-sm flex items-center gap-2 ${
+                    order.status === "revision" ? "text-purple-400" : "text-green-400"
+                  }`}>
+                    {order.status === "revision" ? (
+                      <><RefreshCw className="w-3.5 h-3.5" />Требование правки</>
+                    ) : (
+                      <><PackageCheck className="w-3.5 h-3.5" />Сообщение о сдаче</>
+                    )}
+                  </h4>
+                  <p className="text-xs text-muted-foreground whitespace-pre-wrap leading-relaxed">
+                    {order.deliveryNote}
+                  </p>
+                </CardContent>
+              </Card>
+            )}
+
             {/* Safety tip */}
             <Card className="bg-background border-white/10">
               <CardContent className="p-4">
@@ -586,6 +625,42 @@ export default function OrderDetail({ params }: { params: { id: string } }) {
               <Button type="submit" className="flex-1 gap-2" disabled={updateStatus.isPending || sendMessageRest.isPending}>
                 <PackageCheck className="w-4 h-4" />
                 Подтвердить сдачу
+              </Button>
+            </div>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      {/* Revision request dialog */}
+      <Dialog open={showRevisionDialog} onOpenChange={setShowRevisionDialog}>
+        <DialogContent className="bg-card border-white/10">
+          <DialogHeader>
+            <DialogTitle>Запросить правку</DialogTitle>
+            <DialogDescription>
+              Опишите, что нужно исправить или доработать. Исполнитель получит уведомление.
+            </DialogDescription>
+          </DialogHeader>
+          <form onSubmit={handleRevision} className="space-y-4 mt-2">
+            <div className="space-y-2">
+              <Label>Что нужно исправить <span className="text-destructive">*</span></Label>
+              <Textarea
+                placeholder="Опишите конкретные изменения: что не так, что добавить, что убрать..."
+                value={revisionNote}
+                onChange={(e) => setRevisionNote(e.target.value)}
+                className="min-h-[120px] bg-background/50 border-white/10 resize-none"
+              />
+            </div>
+            <div className="flex gap-2">
+              <Button type="button" variant="ghost" className="flex-1" onClick={() => setShowRevisionDialog(false)}>
+                Отмена
+              </Button>
+              <Button
+                type="submit"
+                className="flex-1 gap-2 bg-purple-600 hover:bg-purple-700"
+                disabled={!revisionNote.trim() || updateStatus.isPending}
+              >
+                <RefreshCw className="w-4 h-4" />
+                Запросить правку
               </Button>
             </div>
           </form>
