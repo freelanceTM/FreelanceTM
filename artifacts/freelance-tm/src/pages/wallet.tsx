@@ -117,7 +117,7 @@ export default function WalletPage() {
 
       toast({
         title: "Заявка отправлена!",
-        description: "Средства зачислены — ожидайте подтверждения администратора.",
+        description: "Средства заморожены на проверку — администратор подтвердит платёж.",
       });
       setAmount("");
       setFile(null);
@@ -136,6 +136,9 @@ export default function WalletPage() {
     return <Layout><div className="container mx-auto p-20 text-center text-muted-foreground">Загрузка...</div></Layout>;
   }
 
+  const spendableBalance = (user as any).balance ?? 0;
+  const pendingBalance = (user as any).pendingBalance ?? 0;
+
   return (
     <Layout>
       <div className="container mx-auto px-4 py-8 md:py-12 max-w-3xl">
@@ -147,15 +150,35 @@ export default function WalletPage() {
           <p className="text-muted-foreground text-sm">Пополняйте баланс через TM CELL</p>
         </div>
 
-        {/* Balance card */}
-        <Card className="mb-6 bg-gradient-to-br from-primary/10 to-secondary/10 border-white/10">
-          <CardContent className="p-6">
-            <p className="text-sm text-muted-foreground mb-1">Текущий баланс</p>
-            <div className="text-4xl font-display font-bold text-primary">
-              {((user as any).balance ?? 0).toLocaleString("ru-RU", { minimumFractionDigits: 2 })} <span className="text-xl font-normal text-muted-foreground">TMT</span>
-            </div>
-          </CardContent>
-        </Card>
+        {/* Balance cards — two distinct metrics */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-6">
+          {/* Available (spendable) balance */}
+          <Card className="bg-gradient-to-br from-primary/10 to-secondary/10 border-white/10">
+            <CardContent className="p-6">
+              <p className="text-xs text-muted-foreground mb-1 uppercase tracking-wide font-medium">Доступный баланс</p>
+              <div className="text-3xl font-display font-bold text-primary">
+                {spendableBalance.toLocaleString("ru-RU", { minimumFractionDigits: 2 })}
+                <span className="text-base font-normal text-muted-foreground ml-1">TMT</span>
+              </div>
+              <p className="text-xs text-muted-foreground mt-2">Можно тратить прямо сейчас</p>
+            </CardContent>
+          </Card>
+
+          {/* Pending (frozen) balance */}
+          <Card className="bg-gradient-to-br from-yellow-500/10 to-orange-500/10 border-yellow-500/20">
+            <CardContent className="p-6">
+              <p className="text-xs text-muted-foreground mb-1 uppercase tracking-wide font-medium flex items-center gap-1">
+                <Clock className="w-3 h-3 text-yellow-400" />
+                Ожидает проверки
+              </p>
+              <div className="text-3xl font-display font-bold text-yellow-400">
+                {pendingBalance.toLocaleString("ru-RU", { minimumFractionDigits: 2 })}
+                <span className="text-base font-normal text-muted-foreground ml-1">TMT</span>
+              </div>
+              <p className="text-xs text-muted-foreground mt-2">Заморожено — ожидает одобрения</p>
+            </CardContent>
+          </Card>
+        </div>
 
         {/* Top-up form */}
         <Card className="mb-8 border-white/10 bg-white/5">
@@ -172,7 +195,7 @@ export default function WalletPage() {
                 <li>Переведите нужную сумму (TMT) на номер: <span className="font-mono text-primary">+993 6X XX XX XX</span></li>
                 <li>Сделайте скриншот подтверждения перевода</li>
                 <li>Введите сумму и прикрепите скриншот ниже</li>
-                <li>Средства будут зачислены автоматически — администратор проверит платёж</li>
+                <li>Средства появятся в «Ожидает проверки» — после подтверждения администратором перейдут в «Доступный баланс»</li>
               </ol>
             </div>
 

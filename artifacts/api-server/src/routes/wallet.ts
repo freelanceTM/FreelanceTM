@@ -58,12 +58,13 @@ router.post("/wallet/topup", extractUser, requireAuth, async (req, res): Promise
   // ── Mock OCR ───────────────────────────────────────────────────────────────
   const ocr = imageBuffer ? mockOcr(imageBuffer) : { status: "verified" as const, confidence: 0 };
 
-  // ── If OCR verified → credit user balance immediately ─────────────────────
+  // ── SECURITY FIX: credit pendingBalance only — NOT the spendable balance ──
+  // The main `balance` is only touched by an admin approve action.
+  // This prevents malicious users from spending funds before admin review.
   if (ocr.status === "verified") {
-    // Atomic increment to avoid race conditions
     await db
       .update(usersTable)
-      .set({ balance: sql`COALESCE(balance, 0) + ${numAmount}` })
+      .set({ pendingBalance: sql`COALESCE(pending_balance, 0) + ${numAmount}` })
       .where(eq(usersTable.id, userId));
   }
 
@@ -86,7 +87,7 @@ router.post("/wallet/topup", extractUser, requireAuth, async (req, res): Promise
     adminStatus: topup.adminStatus,
     screenshotUrl: topup.screenshotUrl,
     createdAt: topup.createdAt,
-    credited: ocr.status === "verified",
+    credited: false,
   });
 });
 
