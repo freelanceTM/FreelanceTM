@@ -117,6 +117,14 @@ export function Navbar() {
                     </Link>
                   </DropdownMenuItem>
                 )}
+                {isBuyer && (
+                  <DropdownMenuItem asChild>
+                    <Link href="/tenders/new" className="w-full flex items-center cursor-pointer">
+                      <Plus className="mr-2 h-4 w-4" />
+                      <span>Post a Request</span>
+                    </Link>
+                  </DropdownMenuItem>
+                )}
                 <DropdownMenuItem asChild>
                   <Link href="/profile" className="w-full flex items-center cursor-pointer">
                     <Wallet className="mr-2 h-4 w-4" />
@@ -170,6 +178,11 @@ export function Navbar() {
                         </Link>
                       )}
                       <Link href="/profile" className="hover:text-primary transition-colors">Profile & Wallet</Link>
+                      {isBuyer && (
+                        <Link href="/tenders/new" className="text-accent font-semibold hover:text-accent/80 transition-colors flex items-center gap-1">
+                          <Plus className="h-3.5 w-3.5" /> Post a Request
+                        </Link>
+                      )}
                       {isBuyer && (
                         <Link href="/tenders/new" className="text-accent font-semibold hover:text-accent/80 transition-colors flex items-center gap-1">
                           <Plus className="h-3.5 w-3.5" /> Post Request
