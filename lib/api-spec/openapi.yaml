@@ -260,6 +260,25 @@ paths:
                 items:
                   $ref: "#/components/schemas/Order"
 
+  /orders:
+    post:
+      operationId: createOrder
+      tags: [orders]
+      summary: Place an order for a gig
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OrderInput'
+      responses:
+        '201':
+          description: Order created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+
   /orders/{id}:
     get:
       operationId: getOrder
@@ -303,6 +322,50 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Order"
+
+  /users/register:
+    post:
+      operationId: registerUser
+      tags: [users]
+      summary: Register or login a user (passwordless)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserRegisterInput'
+      responses:
+        '201':
+          description: User created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '200':
+          description: Existing user returned
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+
+  /users/me/onboarding:
+    post:
+      operationId: completeOnboarding
+      tags: [users]
+      summary: Complete seller/buyer onboarding
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OnboardingInput'
+      responses:
+        '200':
+          description: Updated user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
 
   /users/me:
     get:
@@ -383,7 +446,7 @@ components:
           type: string
         role:
           type: string
-          enum: [buyer, freelancer]
+          enum: [buyer, freelancer, both, client]
 
     LoginInput:
       type: object
@@ -403,10 +466,54 @@ components:
         user:
           $ref: "#/components/schemas/UserProfile"
 
+
+    UserRegisterInput:
+      type: object
+      required: [username, email]
+      properties:
+        username:
+          type: string
+        email:
+          type: string
+          format: email
+        displayName:
+          type: string
+        role:
+          type: string
+          enum: [buyer, freelancer, both, client]
+
+    OnboardingInput:
+      type: object
+      required: [role]
+      properties:
+        role:
+          type: string
+          enum: [buyer, freelancer, both, client]
+        displayName:
+          type: string
+        bio:
+          type: string
+        skills:
+          type: array
+          items:
+            type: string
+        telegramUsername:
+          type: string
+        portfolioUrls:
+          type: array
+          items:
+            type: string
+        languages:
+          type: array
+          items:
+            type: string
+
     UserProfile:
       type: object
-      required: [id, username, email, role]
+      required: [id, username, email, role, onboardingCompleted]
       properties:
+        onboardingCompleted:
+          type: boolean
         id:
           type: integer
         username:

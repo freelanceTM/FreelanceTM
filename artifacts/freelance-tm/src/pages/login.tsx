@@ -14,7 +14,7 @@ import { useToast } from "@/hooks/use-toast";
 
 type Role = "freelancer" | "client" | "both";
 
-const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:3000";
+const API_BASE = import.meta.env.VITE_API_URL || "";
 
 export default function Login() {
   const { t } = useI18n();
@@ -30,7 +30,6 @@ export default function Login() {
 
   const isTelegramWebApp = !!window.Telegram?.WebApp;
 
-  // Auto-login via Telegram initData if available
   useEffect(() => {
     if (!isTelegramWebApp) return;
     const initData = getTelegramInitData();
@@ -48,15 +47,10 @@ export default function Login() {
         if (data.user && data.tokens) {
           login(data.user, data.tokens);
           toast({ title: "Добро пожаловать в FreelanceTM!" });
-          if (!data.user.onboardingCompleted) {
-            setLocation("/onboarding");
-          } else {
-            setLocation("/dashboard");
-          }
+          setLocation(data.user.onboardingCompleted ? "/dashboard" : "/onboarding");
         }
       })
-      .catch((err) => {
-        console.error("Telegram login error:", err);
+      .catch(() => {
         toast({ title: "Ошибка Telegram-авторизации", variant: "destructive" });
       })
       .finally(() => setTelegramLoading(false));
@@ -66,13 +60,19 @@ export default function Login() {
   const registerMutation = useRegisterUser({
     mutation: {
       onSuccess: (data) => {
-        login(data);
+        // The backend returns User + a `token` field for session auth
+        const anyData = data as typeof data & { token?: string };
+        const rawToken = anyData.token;
+        const tokens = rawToken
+          ? { accessToken: rawToken, refreshToken: rawToken, expiresIn: 86400 * 30 }
+          : undefined;
+        login(data, tokens);
+        toast({ title: isLogin ? "С возвращением!" : "Добро пожаловать в FreelanceTM!" });
         if (!data.onboardingCompleted) {
           setLocation("/onboarding");
         } else {
           setLocation("/dashboard");
         }
-        toast({ title: isLogin ? "С возвращением!" : "Добро пожаловать в FreelanceTM!" });
       },
       onError: () => {
         toast({ title: t.common.error, description: "Попробуйте ещё раз.", variant: "destructive" });
@@ -111,11 +111,7 @@ export default function Login() {
         if (data.user && data.tokens) {
           login(data.user, data.tokens);
           toast({ title: "Добро пожаловать!" });
-          if (!data.user.onboardingCompleted) {
-            setLocation("/onboarding");
-          } else {
-            setLocation("/dashboard");
-          }
+          setLocation(data.user.onboardingCompleted ? "/dashboard" : "/onboarding");
         }
       })
       .catch(() => {
@@ -143,7 +139,9 @@ export default function Login() {
 
           <Card className="border-white/10 bg-white/5 backdrop-blur-xl">
             <CardHeader>
-              <CardTitle>{isTelegramWebApp ? "Вход через Telegram" : isLogin ? t.login.signIn : t.login.signUp}</CardTitle>
+              <CardTitle>
+                {isTelegramWebApp ? "Вход через Telegram" : isLogin ? t.login.signIn : t.login.signUp}
+              </CardTitle>
               <CardDescription>
                 {isTelegramWebApp
                   ? "Нажмите кнопку ниже для быстрого входа"
@@ -153,7 +151,7 @@ export default function Login() {
               </CardDescription>
             </CardHeader>
             <CardContent>
-              {isTelegramWebApp ? (
+              {isTelegramWebApp && (
                 <div className="space-y-4">
                   <Button
                     onClick={handleTelegramLogin}
@@ -167,9 +165,12 @@ export default function Login() {
                     Или используйте форму ниже для тестирования
                   </p>
                 </div>
-              ) : null}
+              )}
 
-              <form onSubmit={handleSubmit} className={`space-y-4 ${isTelegramWebApp ? "pt-4 border-t border-white/10 mt-4" : ""}`}>
+              <form
+                onSubmit={handleSubmit}
+                className={`space-y-4 ${isTelegramWebApp ? "pt-4 border-t border-white/10 mt-4" : ""}`}
+              >
                 <div className="space-y-2">
                   <Label htmlFor="username">{t.login.username}</Label>
                   <Input
@@ -194,42 +195,41 @@ export default function Login() {
                   />
                 </div>
 
-                {!isLogin && (
+                {/* Role selection — always shown so every registration has an explicit role choice */}
+                <div className="space-y-2">
+                  <Label>{t.login.chooseRole}</Label>
                   <div className="space-y-2">
-                    <Label>{t.login.chooseRole}</Label>
-                    <div className="space-y-2">
-                      {([
+                    {(
+                      [
                         { value: "client" as Role, icon: ShoppingBag, label: t.login.client },
                         { value: "freelancer" as Role, icon: Briefcase, label: t.login.freelancer },
                         { value: "both" as Role, icon: Users, label: t.login.both },
-                      ]).map(({ value, icon: Icon, label }) => (
-                        <button
-                          key={value}
-                          type="button"
-                          onClick={() => setRole(value)}
-                          className={`w-full flex items-center gap-3 p-3 rounded-lg border text-sm transition-all ${
-                            role === value
-                              ? "border-primary bg-primary/10 text-foreground"
-                              : "border-white/10 bg-white/5 text-muted-foreground hover:border-white/20"
-                          }`}
-                        >
-                          <Icon className="w-4 h-4 shrink-0" />
-                          <span className="font-medium text-left flex-1">{label}</span>
-                          {role === value && <BadgeCheck className="w-4 h-4 text-primary" />}
-                        </button>
-                      ))}
-                    </div>
+                      ] as const
+                    ).map(({ value, icon: Icon, label }) => (
+                      <button
+                        key={value}
+                        type="button"
+                        onClick={() => setRole(value)}
+                        className={`w-full flex items-center gap-3 p-3 rounded-lg border text-sm transition-all ${
+                          role === value
+                            ? "border-primary bg-primary/10 text-foreground"
+                            : "border-white/10 bg-white/5 text-muted-foreground hover:border-white/20"
+                        }`}
+                      >
+                        <Icon className="w-4 h-4 shrink-0" />
+                        <span className="font-medium text-left flex-1">{label}</span>
+                        {role === value && <BadgeCheck className="w-4 h-4 text-primary" />}
+                      </button>
+                    ))}
                   </div>
-                )}
+                </div>
 
                 <Button
                   type="submit"
                   className="w-full mt-4 h-11"
                   disabled={registerMutation.isPending || telegramLoading}
                 >
-                  {registerMutation.isPending ? (
-                    <Loader2 className="w-4 h-4 animate-spin mr-2" />
-                  ) : null}
+                  {registerMutation.isPending && <Loader2 className="w-4 h-4 animate-spin mr-2" />}
                   {t.login.continue}
                 </Button>
               </form>

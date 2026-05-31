@@ -14,6 +14,32 @@ function makeToken(userId: number): string {
   return Buffer.from(`${userId}:${Date.now()}`).toString("base64");
 }
 
+function userResponse(user: typeof usersTable.$inferSelect) {
+  return {
+    id: user.id,
+    username: user.username,
+    email: user.email,
+    role: user.role,
+    onboardingCompleted: user.onboardingCompleted,
+    displayName: user.displayName,
+    bio: user.bio,
+    avatarUrl: user.avatarUrl,
+    location: user.location,
+    skills: user.skills,
+    rating: user.rating,
+    reviewCount: user.reviewCount,
+    completedOrders: user.completedOrders,
+    memberSince: user.createdAt,
+  };
+}
+
+function mapRole(role?: string): "buyer" | "freelancer" | "both" | "admin" {
+  if (role === "client") return "buyer";
+  if (role === "freelancer") return "freelancer";
+  if (role === "both") return "both";
+  return "buyer";
+}
+
 router.post("/auth/register", async (req, res): Promise<void> => {
   const parsed = RegisterBody.safeParse(req.body);
   if (!parsed.success) {
@@ -29,31 +55,21 @@ router.post("/auth/register", async (req, res): Promise<void> => {
     return;
   }
 
-  const [user] = await db.insert(usersTable).values({
-    username,
-    email,
-    passwordHash: hashPassword(password),
-    role: role as "buyer" | "freelancer",
-    skills: [],
-  }).returning();
+  const [user] = await db
+    .insert(usersTable)
+    .values({
+      username,
+      email,
+      passwordHash: hashPassword(password),
+      role: mapRole(role as string),
+      skills: [],
+      onboardingCompleted: false,
+    })
+    .returning();
 
   res.status(201).json({
     token: makeToken(user.id),
-    user: {
-      id: user.id,
-      username: user.username,
-      email: user.email,
-      role: user.role,
-      displayName: user.displayName,
-      bio: user.bio,
-      avatarUrl: user.avatarUrl,
-      location: user.location,
-      skills: user.skills,
-      rating: user.rating,
-      reviewCount: user.reviewCount,
-      completedOrders: user.completedOrders,
-      memberSince: user.createdAt,
-    },
+    user: userResponse(user),
   });
 });
 
@@ -74,21 +90,7 @@ router.post("/auth/login", async (req, res): Promise<void> => {
 
   res.json({
     token: makeToken(user.id),
-    user: {
-      id: user.id,
-      username: user.username,
-      email: user.email,
-      role: user.role,
-      displayName: user.displayName,
-      bio: user.bio,
-      avatarUrl: user.avatarUrl,
-      location: user.location,
-      skills: user.skills,
-      rating: user.rating,
-      reviewCount: user.reviewCount,
-      completedOrders: user.completedOrders,
-      memberSince: user.createdAt,
-    },
+    user: userResponse(user),
   });
 });
 

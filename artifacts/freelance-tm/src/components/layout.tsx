@@ -21,6 +21,23 @@ export function Layout({ children }: { children: ReactNode }) {
     setMobileMenuOpen(false);
   }, [location]);
 
+  // ─── Onboarding guard ────────────────────────────────────────────────────
+  const ONBOARDING_EXEMPT = ['/', '/login', '/onboarding', '/gigs', '/how-it-works'];
+  useEffect(() => {
+    if (!isAuthenticated || !user) return;
+    if ((user as any).onboardingCompleted) return;
+    const isExempt =
+      ONBOARDING_EXEMPT.some(p => location === p) ||
+      location.startsWith('/gigs/') ||
+      location.startsWith('/profile/');
+    if (!isExempt) {
+      setMobileMenuOpen(false);
+      window.location.replace('/onboarding');
+    }
+  }, [isAuthenticated, user, location]);
+  // ─────────────────────────────────────────────────────────────────────────
+
+
   const bottomNavItems = [
     { href: "/", icon: Home, label: "Главная" },
     { href: "/gigs", icon: Search, label: "Каталог" },

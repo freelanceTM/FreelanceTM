@@ -156,4 +156,52 @@ router.patch("/orders/:id/status", extractUser, requireAuth, async (req, res): P
   res.json(await enrichOrder(updated));
 });
 
+
+// ─── CREATE ORDER ─────────────────────────────────────────────────────────────
+
+router.post('/orders', extractUser, requireAuth, async (req, res): Promise<void> => {
+  const { gigId, requirements } = req.body as { gigId?: number; requirements?: string };
+
+  if (!gigId || isNaN(Number(gigId))) {
+    res.status(400).json({ error: 'gigId is required' });
+    return;
+  }
+
+  const buyerId = req.userId!;
+
+  const [gig] = await db.select().from(gigsTable).where(eq(gigsTable.id, Number(gigId)));
+  if (!gig) {
+    res.status(404).json({ error: 'Gig not found' });
+    return;
+  }
+
+  if (buyerId === gig.sellerId) {
+    res.status(400).json({ error: 'Cannot order your own gig' });
+    return;
+  }
+
+  const dueDate = new Date();
+  dueDate.setDate(dueDate.getDate() + gig.deliveryDays);
+
+  const [order] = await db
+    .insert(ordersTable)
+    .values({
+      gigId: gig.id,
+      buyerId,
+      sellerId: gig.sellerId,
+      price: gig.price,
+      status: 'active',
+      deliveryDays: gig.deliveryDays,
+      dueDate,
+      deliveryNote: requirements ?? null,
+    })
+    .returning();
+
+  res.status(201).json(await enrichOrder(order));
+});
+
 export default router;
+
+// ─── CREATE ORDER (POST /orders) ──────────────────────────────────────────────
+// Inserted before the file's export via append; router picks up routes in order.
+// Called by useCreateOrder() hook on the gig detail page.
