@@ -20,6 +20,10 @@ import Favorites from "@/pages/favorites";
 import HowItWorks from "@/pages/how-it-works";
 import WalletPage from "@/pages/wallet";
 import AdminPage from "@/pages/admin";
+import AdminPayments from "@/pages/admin-payments";
+import AdminWithdrawals from "@/pages/admin-withdrawals";
+import AdminDisputes from "@/pages/admin-disputes";
+import AdminUsers from "@/pages/admin-users";
 import Tenders from "@/pages/tenders";
 import TenderDetail from "@/pages/tender-detail";
 import CreateTender from "@/pages/create-tender";
@@ -50,6 +54,10 @@ function Router() {
       <Route path="/how-it-works" component={HowItWorks} />
       <Route path="/wallet" component={WalletPage} />
       <Route path="/admin" component={AdminPage} />
+      <Route path="/admin/payments" component={AdminPayments} />
+      <Route path="/admin/withdrawals" component={AdminWithdrawals} />
+      <Route path="/admin/disputes" component={AdminDisputes} />
+      <Route path="/admin/users" component={AdminUsers} />
       <Route path="/tenders" component={Tenders} />
       <Route path="/tenders/:id" component={TenderDetail} />
       <Route path="/create-tender" component={CreateTender} />

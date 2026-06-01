@@ -1,7 +1,7 @@
 import { Injectable, NotFoundException, ForbiddenException, BadRequestException, Logger } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { PrismaService } from '../prisma/prisma.service';
-import { Prisma, PaymentStatus, DisputeResolution, DisputeStatus } from '@prisma/client';
+import { Prisma, PaymentStatus, DisputeResolution, DisputeStatus, WithdrawalStatus } from '@prisma/client';
 import {
   EVENTS,
   PaymentApprovedEvent,
@@ -9,6 +9,8 @@ import {
   DisputeOpenedEvent,
   DisputeResolvedEvent,
   KycStatusChangedEvent,
+  WithdrawalApprovedEvent,
+  WithdrawalRejectedEvent,
 } from '../events/notification.events';
 import { EscrowService } from '../escrow/escrow.service';
 
@@ -397,6 +399,8 @@ export class AdminService {
       openDisputes,
       pendingReviews,
       pendingGigs,
+      pendingWithdrawals,
+      financialStats,
     ] = await Promise.all([
       this.prisma.user.count(),
       this.prisma.user.count({ where: { role: { in: ['freelancer', 'both'] } } }),
@@ -409,7 +413,29 @@ export class AdminService {
       this.prisma.dispute.count({ where: { status: { in: ['open', 'resolving'] } } }),
       this.prisma.review.count({ where: { status: 'pending' } }),
       this.prisma.gig.count({ where: { status: 'pending_review' } }),
+      this.prisma.withdrawalRequest.count({ where: { status: 'pending' } }),
+      // Financial aggregates via raw SQL — BigInt-safe (returned as TEXT)
+      this.prisma.$queryRaw<Array<{
+        total_balance: string;
+        escrow_locked: string;
+        fee_revenue: string;
+      }>>`
+        SELECT
+          COALESCE((SELECT SUM("balanceNano")::TEXT FROM wallets), '0') AS total_balance,
+          COALESCE((
+            SELECT SUM(FLOOR("totalPrice" * 1000000000))::TEXT
+            FROM orders
+            WHERE status IN ('active', 'delivered', 'disputed')
+          ), '0') AS escrow_locked,
+          COALESCE((
+            SELECT SUM("amountNano")::TEXT
+            FROM transactions
+            WHERE type = 'fee' AND status = 'completed'
+          ), '0') AS fee_revenue
+      `,
     ]);
+
+    const fin = financialStats[0] ?? { total_balance: '0', escrow_locked: '0', fee_revenue: '0' };
 
     return {
       totalUsers,
@@ -423,7 +449,207 @@ export class AdminService {
       openDisputes,
       pendingReviews,
       pendingGigs,
+      pendingWithdrawals,
+      totalBalanceNano: fin.total_balance,
+      escrowLockedNano: fin.escrow_locked,
+      platformFeeRevenueNano: fin.fee_revenue,
     };
+  }
+
+  // ─── Withdrawals ──────────────────────────────────────────────────────────
+
+  async listWithdrawals(status?: WithdrawalStatus, page = 1, limit = 20) {
+    const where: Prisma.WithdrawalRequestWhereInput = {};
+    if (status) where.status = status;
+
+    const [withdrawals, total] = await Promise.all([
+      this.prisma.withdrawalRequest.findMany({
+        where,
+        skip: (page - 1) * limit,
+        take: limit,
+        orderBy: { createdAt: 'desc' },
+        include: {
+          user: {
+            select: {
+              id: true,
+              username: true,
+              displayName: true,
+              telegramChatId: true,
+              wallet: { select: { balanceNano: true } },
+            },
+          },
+        },
+      }),
+      this.prisma.withdrawalRequest.count({ where }),
+    ]);
+
+    return {
+      data: withdrawals.map((w) => ({
+        ...w,
+        amountNano: w.amountNano.toString(),
+        user: {
+          ...w.user,
+          telegramChatId: w.user.telegramChatId?.toString() ?? null,
+          walletBalanceNano: w.user.wallet?.balanceNano?.toString() ?? '0',
+        },
+      })),
+      meta: { total, page, limit },
+    };
+  }
+
+  async approveWithdrawal(withdrawalId: number, adminId: number) {
+    const withdrawal = await this.prisma.withdrawalRequest.findUnique({
+      where: { id: withdrawalId },
+      include: { user: { include: { wallet: true } } },
+    });
+    if (!withdrawal) throw new NotFoundException('Withdrawal request not found');
+    if (withdrawal.status !== 'pending') throw new BadRequestException('Withdrawal already processed');
+
+    if (!withdrawal.user.wallet) {
+      throw new BadRequestException('User does not have a wallet');
+    }
+
+    const currentBalance = withdrawal.user.wallet.balanceNano;
+    if (currentBalance < withdrawal.amountNano) {
+      throw new BadRequestException('Insufficient wallet balance for this withdrawal');
+    }
+
+    const reviewedAt = new Date();
+
+    const updated = await this.prisma.$transaction(async (tx) => {
+      // CAS: only process if still pending
+      const cas = await tx.withdrawalRequest.updateMany({
+        where: { id: withdrawalId, status: 'pending' },
+        data: { status: 'completed', reviewedById: adminId, reviewedAt },
+      });
+      if (cas.count === 0) throw new BadRequestException('Withdrawal already processed');
+
+      // Deduct the amount from the user's wallet
+      await tx.wallet.update({
+        where: { userId: withdrawal.userId },
+        data: { balanceNano: { decrement: withdrawal.amountNano } },
+      });
+
+      // Record the ledger entry
+      await tx.transaction.create({
+        data: {
+          userId: withdrawal.userId,
+          type: 'withdraw',
+          status: 'completed',
+          amountNano: withdrawal.amountNano,
+          currency: withdrawal.currency,
+          metadata: { withdrawalId, adminId, destination: withdrawal.destination },
+        },
+      });
+
+      return tx.withdrawalRequest.findUnique({ where: { id: withdrawalId } });
+    });
+
+    this.eventEmitter.emit(EVENTS.WITHDRAWAL_APPROVED, {
+      withdrawalId,
+      userId: withdrawal.userId,
+      amountNano: withdrawal.amountNano.toString(),
+    } as WithdrawalApprovedEvent);
+
+    return updated;
+  }
+
+  async rejectWithdrawal(withdrawalId: number, adminId: number, note?: string) {
+    const withdrawal = await this.prisma.withdrawalRequest.findUnique({
+      where: { id: withdrawalId },
+      include: { user: { include: { wallet: true } } },
+    });
+    if (!withdrawal) throw new NotFoundException('Withdrawal request not found');
+    if (withdrawal.status !== 'pending') throw new BadRequestException('Withdrawal already processed');
+
+    const reviewedAt = new Date();
+
+    const updated = await this.prisma.$transaction(async (tx) => {
+      const cas = await tx.withdrawalRequest.updateMany({
+        where: { id: withdrawalId, status: 'pending' },
+        data: { status: 'rejected', reviewedById: adminId, reviewedAt, note: note ?? null },
+      });
+      if (cas.count === 0) throw new BadRequestException('Withdrawal already processed');
+
+      // Return funds from hold back to the user's wallet
+      await tx.wallet.update({
+        where: { userId: withdrawal.userId },
+        data: { balanceNano: { increment: withdrawal.amountNano } },
+      });
+
+      return tx.withdrawalRequest.findUnique({ where: { id: withdrawalId } });
+    });
+
+    this.eventEmitter.emit(EVENTS.WITHDRAWAL_REJECTED, {
+      withdrawalId,
+      userId: withdrawal.userId,
+      amountNano: withdrawal.amountNano.toString(),
+      note,
+    } as WithdrawalRejectedEvent);
+
+    return updated;
+  }
+
+  // ─── User Management ──────────────────────────────────────────────────────
+
+  async listUsers(page = 1, limit = 20, search?: string) {
+    const where: Prisma.UserWhereInput = {};
+    if (search) {
+      where.OR = [
+        { username: { contains: search, mode: 'insensitive' } },
+        { displayName: { contains: search, mode: 'insensitive' } },
+      ];
+    }
+
+    const [users, total] = await Promise.all([
+      this.prisma.user.findMany({
+        where,
+        skip: (page - 1) * limit,
+        take: limit,
+        orderBy: { createdAt: 'desc' },
+        select: {
+          id: true,
+          username: true,
+          displayName: true,
+          role: true,
+          isBanned: true,
+          banReason: true,
+          isVerified: true,
+          kycStatus: true,
+          createdAt: true,
+          lastActiveAt: true,
+          completedOrders: true,
+          wallet: { select: { balanceNano: true } },
+        },
+      }),
+      this.prisma.user.count({ where }),
+    ]);
+
+    return {
+      data: users.map((u) => ({
+        ...u,
+        walletBalanceNano: u.wallet?.balanceNano?.toString() ?? '0',
+        wallet: undefined,
+      })),
+      meta: { total, page, limit },
+    };
+  }
+
+  // ─── Order Messages (for dispute chat history) ────────────────────────────
+
+  async getOrderMessages(orderId: number) {
+    const order = await this.prisma.order.findUnique({ where: { id: orderId } });
+    if (!order) throw new NotFoundException('Order not found');
+
+    const messages = await this.prisma.message.findMany({
+      where: { orderId },
+      orderBy: { createdAt: 'asc' },
+      include: {
+        sender: { select: { id: true, username: true, displayName: true, avatarUrl: true } },
+      },
+    });
+
+    return { data: messages };
   }
 
   // ─── Platform Config Management ───────────────────────────────────────────

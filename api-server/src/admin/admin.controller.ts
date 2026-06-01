@@ -8,6 +8,7 @@ import {
   ParseIntPipe,
   Query,
   UseGuards,
+  Delete,
 } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation, ApiQuery } from '@nestjs/swagger';
 import { AdminService } from './admin.service';
@@ -15,7 +16,7 @@ import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { Roles } from '../common/decorators/roles.decorator';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
-import { DisputeResolution } from '@prisma/client';
+import { DisputeResolution, WithdrawalStatus } from '@prisma/client';
 
 @ApiTags('Admin')
 @Controller('admin')
@@ -169,6 +170,71 @@ export class AdminController {
   @ApiOperation({ summary: 'Verify/reject user KYC' })
   async verifyUser(@Param('id', ParseIntPipe) id: number, @Body('status') status: 'approved' | 'rejected') {
     return this.adminService.verifyUser(id, status);
+  }
+
+  // ─── Withdrawals ──────────────────────────────────────────────────────────
+
+  @Get('withdrawals')
+  @ApiOperation({ summary: 'List withdrawal requests' })
+  @ApiQuery({ name: 'status', required: false, enum: ['pending', 'processing', 'completed', 'rejected'] })
+  @ApiQuery({ name: 'page', required: false })
+  @ApiQuery({ name: 'limit', required: false })
+  async listWithdrawals(
+    @Query('status') status?: WithdrawalStatus,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.adminService.listWithdrawals(
+      status,
+      page ? parseInt(page, 10) : 1,
+      limit ? parseInt(limit, 10) : 20,
+    );
+  }
+
+  @Post('withdrawals/:id/approve')
+  @ApiOperation({ summary: 'Approve withdrawal — deducts amount from user wallet' })
+  async approveWithdrawal(
+    @CurrentUser('sub') adminId: number,
+    @Param('id', ParseIntPipe) id: number,
+  ) {
+    return this.adminService.approveWithdrawal(id, adminId);
+  }
+
+  @Post('withdrawals/:id/reject')
+  @ApiOperation({ summary: 'Reject withdrawal — returns held funds to user wallet' })
+  async rejectWithdrawal(
+    @CurrentUser('sub') adminId: number,
+    @Param('id', ParseIntPipe) id: number,
+    @Body('note') note?: string,
+  ) {
+    return this.adminService.rejectWithdrawal(id, adminId, note);
+  }
+
+  // ─── User Management ──────────────────────────────────────────────────────
+
+  @Get('users')
+  @ApiOperation({ summary: 'List all users (CRM)' })
+  @ApiQuery({ name: 'page', required: false })
+  @ApiQuery({ name: 'limit', required: false })
+  @ApiQuery({ name: 'search', required: false })
+  async listUsers(
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+    @Query('search') search?: string,
+  ) {
+    return this.adminService.listUsers(
+      page ? parseInt(page, 10) : 1,
+      limit ? parseInt(limit, 10) : 20,
+      search,
+    );
+  }
+
+  // ─── Order Messages (for dispute arbitration) ─────────────────────────────
+
+  @Get('orders/:orderId/messages')
+  @ApiOperation({ summary: 'Get order chat history for dispute review' })
+  async getOrderMessages(@Param('orderId', ParseIntPipe) orderId: number) {
+    return this.adminService.getOrderMessages(orderId);
   }
 
   // ─── Platform Config ───────────────────────────────────────────────────────

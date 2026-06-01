@@ -12,6 +12,8 @@ export const EVENTS = {
   DISPUTE_RESOLVED: 'dispute.resolved',
   KYC_STATUS_CHANGED: 'kyc.status_changed',
   REVIEW_APPROVED: 'review.approved',
+  WITHDRAWAL_APPROVED: 'withdrawal.approved',
+  WITHDRAWAL_REJECTED: 'withdrawal.rejected',
 } as const;
 
 export interface OrderCreatedEvent {
@@ -91,4 +93,17 @@ export interface KycStatusChangedEvent {
  */
 export interface ReviewApprovedEvent {
   reviewId: number;
+}
+
+export interface WithdrawalApprovedEvent {
+  withdrawalId: number;
+  userId: number;
+  amountNano: string;
+}
+
+export interface WithdrawalRejectedEvent {
+  withdrawalId: number;
+  userId: number;
+  amountNano: string;
+  note?: string;
 }

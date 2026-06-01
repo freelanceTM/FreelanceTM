@@ -15,6 +15,8 @@ import {
   DisputeOpenedEvent,
   DisputeResolvedEvent,
   KycStatusChangedEvent,
+  WithdrawalApprovedEvent,
+  WithdrawalRejectedEvent,
 } from '../events/notification.events';
 
 @Injectable()
@@ -301,6 +303,27 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       ? 'Ваш аккаунт верифицирован. Теперь вы получаете значок ✓.'
       : 'Ваш запрос на верификацию отклонён. Обратитесь в поддержку.';
     await this.notify(payload.userId, { title, body });
+  }
+
+  @OnEvent(EVENTS.WITHDRAWAL_APPROVED)
+  async onWithdrawalApproved(payload: WithdrawalApprovedEvent) {
+    const ton = (Number(payload.amountNano) / 1e9).toFixed(4);
+    await this.notify(payload.userId, {
+      title: '✅ Вывод средств одобрен',
+      body: `Ваш запрос на вывод ${ton} TON одобрен. Средства будут переведены на ваш адрес.`,
+      data: { withdrawalId: payload.withdrawalId },
+    });
+  }
+
+  @OnEvent(EVENTS.WITHDRAWAL_REJECTED)
+  async onWithdrawalRejected(payload: WithdrawalRejectedEvent) {
+    const ton = (Number(payload.amountNano) / 1e9).toFixed(4);
+    const reasonText = payload.note ? `: ${payload.note}` : '.';
+    await this.notify(payload.userId, {
+      title: '❌ Заявка на вывод отклонена',
+      body: `Запрос на вывод ${ton} TON отклонён${reasonText} Средства возвращены на ваш баланс.`,
+      data: { withdrawalId: payload.withdrawalId },
+    });
   }
 
   // ─── HELPERS ───────────────────────────────────────────────────────────
