@@ -2,7 +2,7 @@ import { useLocation, Link } from "wouter";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import * as z from "zod";
-import { useRegister } from "@workspace/api-client-react";
+import { useRegisterUser } from "@workspace/api-client-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { useToast } from "@/hooks/use-toast";
 import { Button } from "@/components/ui/button";
@@ -43,7 +43,7 @@ export default function Register() {
     defaultValues: { username: "", email: "", password: "", role: "buyer" },
   });
 
-  const registerMutation = useRegister();
+  const registerMutation = useRegisterUser();
 
   function onSubmit(values: FormValues) {
     registerMutation.mutate(

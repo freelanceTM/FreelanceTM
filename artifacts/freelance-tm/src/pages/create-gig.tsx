@@ -96,9 +96,7 @@ export default function CreateGig() {
         toast({ title: "Услуга создана!" });
         setLocation(`/gigs/${data.id}`);
       },
-      onError: () => {
-        toast({ title: "Не удалось создать услугу", variant: "destructive" });
-      },
+
     },
   });
 

@@ -1,5 +1,8 @@
 import { Switch, Route, Router as WouterRouter } from "wouter";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClient, QueryClientProvider, QueryCache, MutationCache } from "@tanstack/react-query";
+import { toast } from "@/hooks/use-toast";
+import { getErrorToast } from "@/lib/api-error";
+import { ApiError } from "@workspace/api-client-react";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { I18nProvider } from "@/lib/i18n";
@@ -8,6 +11,7 @@ import NotFound from "@/pages/not-found";
 
 import Home from "@/pages/home";
 import Login from "@/pages/login";
+import VerifyEmail from "@/pages/verify-email";
 import Gigs from "@/pages/gigs";
 import GigDetail from "@/pages/gig-detail";
 import Dashboard from "@/pages/dashboard";
@@ -27,8 +31,24 @@ import AdminUsers from "@/pages/admin-users";
 import Tenders from "@/pages/tenders";
 import TenderDetail from "@/pages/tender-detail";
 import CreateTender from "@/pages/create-tender";
+import TermsPage from "@/pages/legal/terms";
+import EscrowPage from "@/pages/legal/escrow";
+import PrivacyPage from "@/pages/legal/privacy";
 
 const queryClient = new QueryClient({
+  queryCache: new QueryCache({
+    onError: (error) => {
+      if (error instanceof ApiError && error.status < 500) return;
+      const qt = getErrorToast(error);
+      toast({ title: qt.title, description: qt.description, variant: "destructive" });
+    },
+  }),
+  mutationCache: new MutationCache({
+    onError: (error) => {
+      const mt = getErrorToast(error);
+      toast({ title: mt.title, description: mt.description, variant: "destructive" });
+    },
+  }),
   defaultOptions: {
     queries: {
       staleTime: 1000 * 30,
@@ -42,6 +62,7 @@ function Router() {
     <Switch>
       <Route path="/" component={Home} />
       <Route path="/login" component={Login} />
+      <Route path="/verify-email" component={VerifyEmail} />
       <Route path="/gigs" component={Gigs} />
       <Route path="/gigs/:id" component={GigDetail} />
       <Route path="/dashboard" component={Dashboard} />
@@ -61,6 +82,9 @@ function Router() {
       <Route path="/tenders" component={Tenders} />
       <Route path="/tenders/:id" component={TenderDetail} />
       <Route path="/create-tender" component={CreateTender} />
+      <Route path="/terms" component={TermsPage} />
+      <Route path="/escrow" component={EscrowPage} />
+      <Route path="/privacy" component={PrivacyPage} />
       <Route component={NotFound} />
     </Switch>
   );

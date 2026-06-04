@@ -256,7 +256,7 @@ export default function Dashboard() {
                 <div className="grid sm:grid-cols-2 md:grid-cols-3 gap-4">
                   {Array(3).fill(0).map((_, i) => <Skeleton key={i} className="h-52 bg-white/5 rounded-xl" />)}
                 </div>
-              ) : !myGigs?.gigs.length ? (
+              ) : !(myGigs?.gigs?.length) ? (
                 <div className="text-center py-16 bg-white/5 rounded-xl border border-white/10">
                   <h3 className="text-lg font-medium mb-2">{t.dashboard.noGigs}</h3>
                   <p className="text-muted-foreground text-sm mb-4">{t.dashboard.noGigsSub}</p>
@@ -264,7 +264,7 @@ export default function Dashboard() {
                 </div>
               ) : (
                 <div className="grid sm:grid-cols-2 md:grid-cols-3 gap-4">
-                  {myGigs.gigs.map(gig => (
+                  {(myGigs?.gigs ?? []).map(gig => (
                     <Card key={gig.id} className="bg-white/5 border-white/10 overflow-hidden">
                       {gig.imageUrl && (
                         <div className="h-28 overflow-hidden">

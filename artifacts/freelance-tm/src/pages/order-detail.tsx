@@ -25,6 +25,7 @@ import {
 import { useEffect, useRef, useState } from "react";
 import { Link, useLocation } from "wouter";
 import { useToast } from "@/hooks/use-toast";
+import { getErrorToast } from "@/lib/api-error";
 import { useQueryClient } from "@tanstack/react-query";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
@@ -124,7 +125,7 @@ export default function OrderDetail({ params }: { params: { id: string } }) {
         toast({ title: statusToastMsg(data.status) });
         invalidate();
       },
-      onError: () => toast({ title: "Ошибка при смене статуса", variant: "destructive" }),
+
     },
   });
 
@@ -135,7 +136,7 @@ export default function OrderDetail({ params }: { params: { id: string } }) {
         setShowReviewDialog(false);
         invalidate();
       },
-      onError: () => toast({ title: "Не удалось опубликовать отзыв", variant: "destructive" }),
+
     },
   });
 
@@ -210,8 +211,9 @@ export default function OrderDetail({ params }: { params: { id: string } }) {
       if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || "Ошибка");
       toast({ title: "Спор открыт", description: "Администратор рассмотрит ситуацию и примет решение." });
       invalidate();
-    } catch (err: any) {
-      toast({ title: err.message, variant: "destructive" });
+    } catch (err: unknown) {
+      const { title, description } = getErrorToast(err);
+      toast({ title, description, variant: "destructive" });
     } finally {
       setDisputeLoading(false);
     }

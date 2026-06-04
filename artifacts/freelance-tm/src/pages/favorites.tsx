@@ -29,7 +29,7 @@ export default function Favorites() {
     { query: { enabled: (favoriteIds?.length ?? 0) > 0, queryKey: getListGigsQueryKey({ limit: 100 }) } }
   );
 
-  const favoriteGigs = gigsData?.gigs.filter(g => favoriteIds?.includes(g.id)) ?? [];
+  const favoriteGigs = (gigsData?.gigs ?? []).filter(g => favoriteIds?.includes(g.id));
   const isLoading = favsLoading || gigsLoading;
 
   return (

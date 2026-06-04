@@ -1,14 +1,20 @@
 import { Router, type IRouter } from "express";
 import { db, usersTable, walletTransactionsTable } from "@workspace/db";
-import { eq, desc } from "drizzle-orm";
-import { UpdateProfileBody } from "@workspace/api-zod";
+import { emailVerificationCodesTable } from "@workspace/db";
+import { eq, desc, gt } from "drizzle-orm";
+import { UpdateMeBody as UpdateProfileBody } from "@workspace/api-zod";
 import { extractUser, requireAuth } from "../middleware/auth";
 import { createLinkToken, BOT_NAME } from "../lib/telegram";
+import { sendOtpEmail } from "../lib/email";
 
 const router: IRouter = Router();
 
 function makeToken(userId: number): string {
   return Buffer.from(`${userId}:${Date.now()}`).toString("base64");
+}
+
+function generateOtp(): string {
+  return Math.floor(100000 + Math.random() * 900000).toString();
 }
 
 function userResponse(user: typeof usersTable.$inferSelect) {
@@ -18,6 +24,7 @@ function userResponse(user: typeof usersTable.$inferSelect) {
     email: user.email,
     role: user.role,
     onboardingCompleted: user.onboardingCompleted,
+    emailVerified: user.emailVerified,
     displayName: user.displayName,
     bio: user.bio,
     avatarUrl: user.avatarUrl,
@@ -69,11 +76,21 @@ router.post("/users/register", async (req, res): Promise<void> => {
       role: mapRole(role),
       skills: [],
       onboardingCompleted: false,
+      emailVerified: false,
     })
     .returning();
 
-  const token = makeToken(user.id);
-  res.status(201).json({ ...userResponse(user), token });
+  const code = generateOtp();
+  const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
+
+  await db.delete(emailVerificationCodesTable).where(
+    eq(emailVerificationCodesTable.email, email)
+  );
+  await db.insert(emailVerificationCodesTable).values({ email, code, expiresAt });
+
+  await sendOtpEmail(email, code);
+
+  res.status(201).json({ requireVerification: true, email: user.email });
 });
 
 // ─── GET ME ───────────────────────────────────────────────────────────────────
@@ -100,7 +117,7 @@ router.patch("/users/me", extractUser, requireAuth, async (req, res): Promise<vo
       displayName: parsed.data.displayName,
       bio: parsed.data.bio,
       location: parsed.data.location,
-      skills: parsed.data.skills,
+      skills: parsed.data.skills ?? [],
       avatarUrl: parsed.data.avatarUrl,
     })
     .where(eq(usersTable.id, req.userId!))
@@ -111,7 +128,7 @@ router.patch("/users/me", extractUser, requireAuth, async (req, res): Promise<vo
 
 // ─── COMPLETE ONBOARDING ──────────────────────────────────────────────────────
 router.post("/users/me/onboarding", extractUser, requireAuth, async (req, res): Promise<void> => {
-  const { role, displayName, bio, skills } = req.body as {
+  const { role, displayName, bio, skills, telegramUsername, portfolioUrls, languages } = req.body as {
     role?: string;
     displayName?: string;
     bio?: string;
@@ -121,20 +138,30 @@ router.post("/users/me/onboarding", extractUser, requireAuth, async (req, res): 
     languages?: string[];
   };
 
-  const updates: Partial<typeof usersTable.$inferInsert> = {
-    onboardingCompleted: true,
-    role: mapRole(role),
-  };
-  if (displayName) updates.displayName = displayName;
-  if (bio) updates.bio = bio;
-  if (Array.isArray(skills)) updates.skills = skills;
-
   const [user] = await db
     .update(usersTable)
-    .set(updates)
+    .set({
+      role: mapRole(role),
+      displayName: displayName ?? null,
+      bio: bio ?? null,
+      skills: skills ?? [],
+      onboardingCompleted: true,
+    })
     .where(eq(usersTable.id, req.userId!))
     .returning();
 
+  res.json(userResponse(user));
+});
+
+// ─── GET USER PROFILE ────────────────────────────────────────────────────────
+router.get("/users/:id", async (req, res): Promise<void> => {
+  const id = parseInt(req.params.id, 10);
+  if (isNaN(id)) {
+    res.status(400).json({ error: "Invalid user ID" });
+    return;
+  }
+
+  const [user] = await db.select().from(usersTable).where(eq(usersTable.id, id));
   if (!user) {
     res.status(404).json({ error: "User not found" });
     return;
@@ -169,14 +196,10 @@ router.get("/users/me/wallet", extractUser, requireAuth, async (req, res): Promi
   });
 });
 
-// ─── TELEGRAM LINK ────────────────────────────────────────────────────────────
-// Generates a one-time deep-link token (15-min TTL) the user sends to the bot.
-// Returns { url: "https://t.me/BOTNAME?start=TOKEN" }
-
+// ─── TELEGRAM LINK TOKEN ──────────────────────────────────────────────────────
 router.get("/users/me/telegram-link", extractUser, requireAuth, async (req, res): Promise<void> => {
   const userId = req.userId!;
 
-  // Check if already linked
   const [user] = await db.select().from(usersTable).where(eq(usersTable.id, userId));
   if (user?.telegramChatId) {
     res.json({ linked: true, url: null });
@@ -195,23 +218,6 @@ router.delete("/users/me/telegram", extractUser, requireAuth, async (req, res): 
     .set({ telegramChatId: null })
     .where(eq(usersTable.id, req.userId!));
   res.json({ ok: true });
-});
-
-// ─── PUBLIC PROFILE ───────────────────────────────────────────────────────────
-router.get("/users/:id", async (req, res): Promise<void> => {
-  const userId = parseInt(req.params.id, 10);
-  if (isNaN(userId) || userId <= 0) {
-    res.status(400).json({ error: "Invalid user id" });
-    return;
-  }
-
-  const [user] = await db.select().from(usersTable).where(eq(usersTable.id, userId));
-  if (!user) {
-    res.status(404).json({ error: "User not found" });
-    return;
-  }
-
-  res.json(userResponse(user));
 });
 
 export default router;

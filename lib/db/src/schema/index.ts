@@ -8,3 +8,4 @@ export * from "./topups";
 export * from "./payouts";
 export * from "./reviews";
 export * from "./messages";
+export * from "./verification";

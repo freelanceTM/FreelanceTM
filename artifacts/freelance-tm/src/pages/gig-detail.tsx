@@ -41,9 +41,7 @@ export default function GigDetail({ params }: { params: { id: string } }) {
         toast({ title: "Заказ размещён успешно!" });
         setLocation(`/orders/${data.id}`);
       },
-      onError: () => {
-        toast({ title: "Не удалось разместить заказ", variant: "destructive" });
-      },
+
     },
   });
 

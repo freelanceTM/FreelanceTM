@@ -152,9 +152,7 @@ export default function TenderDetail({ params }: { params: { id: string } }) {
       setIsBidOpen(false);
       qc.invalidateQueries({ queryKey: ["tender", tenderId] });
     },
-    onError: (err: Error) => {
-      toast({ title: err.message || "Не удалось отправить предложение", variant: "destructive" });
-    },
+
   });
 
   const selectBid = useMutation({
@@ -173,9 +171,7 @@ export default function TenderDetail({ params }: { params: { id: string } }) {
       toast({ title: "Исполнитель выбран, заказ создан!" });
       setLocation(`/orders/${data.order.id}`);
     },
-    onError: (err: Error) => {
-      toast({ title: err.message, variant: "destructive" });
-    },
+
   });
 
   if (isLoading) {
@@ -259,14 +255,14 @@ export default function TenderDetail({ params }: { params: { id: string } }) {
             </div>
 
             {/* Skills */}
-            {tender.skills.length > 0 && (
+            {(tender.skills ?? []).length > 0 && (
               <div>
                 <h4 className="font-semibold mb-3 flex items-center gap-2 text-sm">
                   <Tag className="w-4 h-4 text-muted-foreground" />
                   Требуемые навыки
                 </h4>
                 <div className="flex flex-wrap gap-2">
-                  {tender.skills.map((skill) => (
+                  {(tender.skills ?? []).map((skill) => (
                     <span key={skill} className="px-3 py-1 rounded-full bg-white/5 border border-white/10 text-xs text-muted-foreground">
                       #{skill}
                     </span>

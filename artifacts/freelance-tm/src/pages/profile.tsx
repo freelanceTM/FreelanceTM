@@ -336,13 +336,13 @@ export default function Profile({ params }: { params: { userId: string } }) {
               <div className="grid sm:grid-cols-2 gap-4">
                 {gigsLoading ? (
                   Array(4).fill(0).map((_, i) => <Skeleton key={i} className="h-56 w-full bg-white/5 rounded-xl" />)
-                ) : !userGigs?.gigs.length ? (
+                ) : !userGigs?.gigs?.length ? (
                   <div className="sm:col-span-2 text-center py-12 bg-white/5 rounded-xl border border-white/10">
                     <ShoppingBag className="w-10 h-10 text-muted-foreground mx-auto mb-3 opacity-40" />
                     <p className="text-muted-foreground text-sm">{t.profile.noGigs}</p>
                   </div>
                 ) : (
-                  userGigs.gigs.map((gig) => (
+                  (userGigs.gigs ?? []).map((gig) => (
                     <div key={gig.id} className="relative group">
                       <Link href={`/gigs/${gig.id}`}>
                         <Card className="h-full bg-white/5 hover:bg-white/[0.08] border-white/10 transition-all cursor-pointer group">

@@ -11,6 +11,7 @@ export const usersTable = pgTable("users", {
   passwordHash: text("password_hash").notNull(),
   role: userRoleEnum("role").notNull().default("buyer"),
   onboardingCompleted: boolean("onboarding_completed").notNull().default(false),
+  emailVerified: boolean("email_verified").notNull().default(false),
   displayName: text("display_name"),
   bio: text("bio"),
   avatarUrl: text("avatar_url"),

@@ -40,9 +40,6 @@ export default function Onboarding() {
         toast({ title: "Профиль заполнен! Добро пожаловать 🎉" });
         setLocation("/dashboard");
       },
-      onError: () => {
-        toast({ title: t.common.error, variant: "destructive" });
-      }
     }
   });
 

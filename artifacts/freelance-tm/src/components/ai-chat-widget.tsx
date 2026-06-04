@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect } from "react";
+import { extractErrorMessage } from "@/lib/api-error";
 import { motion, AnimatePresence } from "framer-motion";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -65,7 +66,7 @@ export function AIChatWidget() {
           role: "assistant",
           content: isRateLimit
             ? "⏳ Достигнут лимит запросов к ИИ. Пожалуйста, подождите минуту и попробуйте снова."
-            : "Извините, произошла ошибка. Попробуйте ещё раз.",
+            : "❌ " + extractErrorMessage(err),
         },
       ]);
     } finally {

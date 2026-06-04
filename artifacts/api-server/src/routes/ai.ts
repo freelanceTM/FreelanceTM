@@ -7,6 +7,31 @@ const router: IRouter = Router();
 
 const apiKey = process.env["GEMINI_API_KEY"];
 const genAI = apiKey ? new GoogleGenerativeAI(apiKey) : null;
+const groqApiKey = process.env["GROQ_API_KEY"];
+
+async function callGroq(systemPrompt: string, messages: Array<{ role: string; content: string }>): Promise<string> {
+  const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": "Bearer " + groqApiKey,
+    },
+    body: JSON.stringify({
+      model: "llama-3.3-70b-versatile",
+      messages: [
+        { role: "system", content: systemPrompt },
+        ...messages.map((m) => ({ role: m.role === "assistant" ? "assistant" : "user", content: m.content })),
+      ],
+      max_tokens: 1024,
+    }),
+  });
+  if (!response.ok) {
+    const err = await response.text();
+    throw new Error("Groq error " + response.status + ": " + err.slice(0, 200));
+  }
+  const data = await response.json() as { choices: Array<{ message: { content: string } }> };
+  return data.choices[0]?.message?.content ?? "";
+}
 
 const SYSTEM_PROMPT = `Ты — ИИ-ассистент платформы FreelanceTM, первой цифровой фриланс-платформы Туркменистана.
 
@@ -60,7 +85,7 @@ const TZ_SYSTEM_PROMPT = `Ты — помощник по составлению 
 // ─── EXISTING: General AI chat ─────────────────────────────────────────────
 
 router.post("/ai/chat", async (req, res): Promise<void> => {
-  if (!genAI) {
+  if (!genAI && !groqApiKey) {
     res.status(503).json({ error: "AI service not configured" });
     return;
   }
@@ -75,22 +100,27 @@ router.post("/ai/chat", async (req, res): Promise<void> => {
     return;
   }
 
+  const systemPrompt = mode === "tz" ? TZ_SYSTEM_PROMPT : SYSTEM_PROMPT;
+
   try {
-    const systemPrompt = mode === "tz" ? TZ_SYSTEM_PROMPT : SYSTEM_PROMPT;
-    const model = genAI.getGenerativeModel({
-      model: "gemini-2.0-flash",
-      systemInstruction: systemPrompt,
-    });
+    let text: string;
 
-    const history = messages.slice(0, -1).map((m) => ({
-      role: m.role === "assistant" ? "model" : "user",
-      parts: [{ text: m.content }],
-    }));
-
-    const lastMessage = messages[messages.length - 1];
-    const chat = model.startChat({ history });
-    const result = await chat.sendMessage(lastMessage.content);
-    const text = result.response.text();
+    if (genAI) {
+      const model = genAI.getGenerativeModel({
+        model: "gemini-2.0-flash",
+        systemInstruction: systemPrompt,
+      });
+      const history = messages.slice(0, -1).map((m) => ({
+        role: m.role === "assistant" ? "model" : "user",
+        parts: [{ text: m.content }],
+      }));
+      const lastMessage = messages[messages.length - 1];
+      const chat = model.startChat({ history });
+      const result = await chat.sendMessage(lastMessage.content);
+      text = result.response.text();
+    } else {
+      text = await callGroq(systemPrompt, messages);
+    }
 
     res.json({ content: text });
   } catch (err: unknown) {

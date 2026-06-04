@@ -5,6 +5,7 @@ import { LangSwitcher } from "@/components/lang-switcher";
 import { Button } from "@/components/ui/button";
 import { LayoutDashboard, LogIn, LogOut, Plus, Search, Heart, Menu, X, Home, BookOpen, User, ClipboardList, Wallet, ShieldCheck } from "lucide-react";
 import { ReactNode, useEffect, useState } from "react";
+import { CookieBanner } from "@/components/cookie-banner";
 
 export function Layout({ children }: { children: ReactNode }) {
   const { user, isAuthenticated, logout } = useAuth();
@@ -22,7 +23,7 @@ export function Layout({ children }: { children: ReactNode }) {
   }, [location]);
 
   // ─── Onboarding guard ────────────────────────────────────────────────────
-  const ONBOARDING_EXEMPT = ['/', '/login', '/onboarding', '/gigs', '/how-it-works'];
+  const ONBOARDING_EXEMPT = ['/', '/login', '/onboarding', '/gigs', '/how-it-works', '/verify-email', '/tenders'];
   useEffect(() => {
     if (!isAuthenticated || !user) return;
     if ((user as any).onboardingCompleted) return;
@@ -287,22 +288,33 @@ export function Layout({ children }: { children: ReactNode }) {
             <ul className="space-y-2 text-sm text-muted-foreground">
               <li><a href="#" className="hover:text-primary transition-colors">Telegram-канал</a></li>
               <li><a href="#" className="hover:text-primary transition-colors">Служба поддержки</a></li>
+              <li className="pt-2 border-t border-white/10"><Link href="/terms" className="hover:text-primary transition-colors">Польз. соглашение</Link></li>
+              <li><Link href="/escrow" className="hover:text-primary transition-colors">Безопасная сделка</Link></li>
+              <li><Link href="/privacy" className="hover:text-primary transition-colors">Конфиденциальность</Link></li>
             </ul>
           </div>
         </div>
         <div className="container mx-auto px-4 md:px-8 mt-12 pt-8 border-t border-white/5 text-sm text-muted-foreground flex flex-col md:flex-row justify-between items-center">
           <p>© 2026 FreelanceTM. Все права защищены.</p>
           <div className="flex gap-4 mt-4 md:mt-0">
-            <a href="#" className="hover:text-foreground transition-colors">Правила</a>
-            <a href="#" className="hover:text-foreground transition-colors">Конфиденциальность</a>
+            <Link href="/terms" className="hover:text-foreground transition-colors">Пользовательское соглашение</Link>
+            <Link href="/escrow" className="hover:text-foreground transition-colors">Безопасная сделка</Link>
+            <Link href="/privacy" className="hover:text-foreground transition-colors">Конфиденциальность</Link>
           </div>
         </div>
       </footer>
 
       {/* Mobile footer (mini) */}
-      <div className="md:hidden border-t border-white/5 bg-background py-6 px-4 text-center text-xs text-muted-foreground">
-        © 2026 FreelanceTM
+      <div className="md:hidden border-t border-white/5 bg-background py-6 px-4 text-center text-xs text-muted-foreground space-y-2">
+        <p>© 2026 FreelanceTM</p>
+        <div className="flex justify-center gap-4">
+          <Link href="/terms" className="hover:text-foreground transition-colors">Соглашение</Link>
+          <Link href="/escrow" className="hover:text-foreground transition-colors">Эскроу</Link>
+          <Link href="/privacy" className="hover:text-foreground transition-colors">Конфиденциальность</Link>
+        </div>
       </div>
+
+      <CookieBanner />
 
       {/* Mobile bottom nav */}
       <nav className="md:hidden fixed bottom-0 inset-x-0 z-40 bg-background/90 backdrop-blur-md border-t border-white/10">

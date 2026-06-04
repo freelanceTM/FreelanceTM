@@ -181,15 +181,15 @@ export default function Tenders() {
                     </p>
 
                     {/* Skills */}
-                    {tender.skills.length > 0 && (
+                    {(tender.skills ?? []).length > 0 && (
                       <div className="flex flex-wrap gap-1">
-                        {tender.skills.slice(0, 4).map((skill) => (
+                        {(tender.skills ?? []).slice(0, 4).map((skill) => (
                           <span key={skill} className="px-1.5 py-0.5 rounded bg-white/5 text-[10px] text-muted-foreground">
                             #{skill}
                           </span>
                         ))}
-                        {tender.skills.length > 4 && (
-                          <span className="text-[10px] text-muted-foreground">+{tender.skills.length - 4}</span>
+                        {(tender.skills ?? []).length > 4 && (
+                          <span className="text-[10px] text-muted-foreground">+{(tender.skills ?? []).length - 4}</span>
                         )}
                       </div>
                     )}

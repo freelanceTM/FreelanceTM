@@ -64,7 +64,7 @@ router.get("/gigs", async (req, res): Promise<void> => {
     .where(whereClause);
 
   res.json({
-    items: rows.map((r) => gigWithDetails(r.gig, r.user, r.category)),
+    gigs: rows.map((r) => gigWithDetails(r.gig, r.user, r.category)),
     total: totalRow?.total ?? 0,
     page: page ?? 1,
     limit: limit ?? 20,

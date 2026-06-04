@@ -120,9 +120,6 @@ export default function CreateTender() {
       toast({ title: "Тендер опубликован!" });
       setLocation(`/tenders/${data.id}`);
     },
-    onError: (err: Error) => {
-      toast({ title: err.message || "Не удалось создать тендер", variant: "destructive" });
-    },
   });
 
   const handleSubmit = async (e: React.FormEvent) => {

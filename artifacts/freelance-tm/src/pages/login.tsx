@@ -27,6 +27,7 @@ export default function Login() {
   const [email, setEmail] = useState("");
   const [role, setRole] = useState<Role>("client");
   const [telegramLoading, setTelegramLoading] = useState(false);
+  const [agreed, setAgreed] = useState(false);
 
   const isTelegramWebApp = !!window.Telegram?.WebApp;
 
@@ -60,14 +61,25 @@ export default function Login() {
   const registerMutation = useRegisterUser({
     mutation: {
       onSuccess: (data) => {
-        // The backend returns User + a `token` field for session auth
-        const anyData = data as typeof data & { token?: string };
+        const anyData = data as typeof data & {
+          token?: string;
+          requireVerification?: boolean;
+          email?: string;
+        };
+
+        if (anyData.requireVerification) {
+          const userEmail = anyData.email || email;
+          toast({ title: "Код подтверждения отправлен на " + userEmail });
+          setLocation(`/verify-email?email=${encodeURIComponent(userEmail)}`);
+          return;
+        }
+
         const rawToken = anyData.token;
         const tokens = rawToken
           ? { accessToken: rawToken, refreshToken: rawToken, expiresIn: 86400 * 30 }
           : undefined;
         login(data, tokens);
-        toast({ title: isLogin ? "С возвращением!" : "Добро пожаловать в FreelanceTM!" });
+        toast({ title: "С возвращением!" });
         if (!data.onboardingCompleted) {
           setLocation("/onboarding");
         } else {
@@ -75,18 +87,44 @@ export default function Login() {
         }
       },
       onError: () => {
-        toast({ title: t.common.error, description: "Попробуйте ещё раз.", variant: "destructive" });
+        if (isLogin) {
+          toast({
+            title: "Не удалось войти",
+            description: "Проверьте email и попробуйте снова",
+            variant: "destructive",
+          });
+        } else {
+          toast({
+            title: "Ошибка регистрации",
+            description: "Возможно, этот username или email уже занят",
+            variant: "destructive",
+          });
+        }
       },
     },
   });
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!username || !email) {
-      toast({ title: "Заполните все поля", variant: "destructive" });
-      return;
+
+    if (isLogin) {
+      if (!email) {
+        toast({ title: "Введите email", variant: "destructive" });
+        return;
+      }
+      const derivedUsername = email.split("@")[0].replace(/[^a-zA-Z0-9_]/g, "_") || "user";
+      registerMutation.mutate({ data: { username: derivedUsername, email, role } });
+    } else {
+      if (!username || !email) {
+        toast({ title: "Заполните все поля", variant: "destructive" });
+        return;
+      }
+      if (!agreed) {
+        toast({ title: "Примите условия использования", variant: "destructive" });
+        return;
+      }
+      registerMutation.mutate({ data: { username, email, role } });
     }
-    registerMutation.mutate({ data: { username, email, role } });
   };
 
   const handleTelegramLogin = () => {
@@ -120,6 +158,13 @@ export default function Login() {
       .finally(() => setTelegramLoading(false));
   };
 
+  const handleModeSwitch = () => {
+    setIsLogin(!isLogin);
+    setUsername("");
+    setEmail("");
+    setAgreed(false);
+  };
+
   return (
     <Layout>
       <div className="min-h-[80vh] flex flex-col items-center justify-center p-4">
@@ -146,7 +191,7 @@ export default function Login() {
                 {isTelegramWebApp
                   ? "Нажмите кнопку ниже для быстрого входа"
                   : isLogin
-                  ? "Введите данные для входа"
+                  ? "Введите email, чтобы войти в аккаунт"
                   : "Создайте аккаунт на FreelanceTM"}
               </CardDescription>
             </CardHeader>
@@ -171,17 +216,20 @@ export default function Login() {
                 onSubmit={handleSubmit}
                 className={`space-y-4 ${isTelegramWebApp ? "pt-4 border-t border-white/10 mt-4" : ""}`}
               >
-                <div className="space-y-2">
-                  <Label htmlFor="username">{t.login.username}</Label>
-                  <Input
-                    id="username"
-                    placeholder="e.g. turkmen_dev"
-                    value={username}
-                    onChange={(e) => setUsername(e.target.value)}
-                    className="bg-background/50 border-white/10"
-                    autoComplete="username"
-                  />
-                </div>
+                {!isLogin && (
+                  <div className="space-y-2">
+                    <Label htmlFor="username">{t.login.username}</Label>
+                    <Input
+                      id="username"
+                      placeholder="e.g. turkmen_dev"
+                      value={username}
+                      onChange={(e) => setUsername(e.target.value)}
+                      className="bg-background/50 border-white/10"
+                      autoComplete="username"
+                    />
+                  </div>
+                )}
+
                 <div className="space-y-2">
                   <Label htmlFor="email">{t.login.email}</Label>
                   <Input
@@ -195,42 +243,64 @@ export default function Login() {
                   />
                 </div>
 
-                {/* Role selection — always shown so every registration has an explicit role choice */}
-                <div className="space-y-2">
-                  <Label>{t.login.chooseRole}</Label>
-                  <div className="space-y-2">
-                    {(
-                      [
-                        { value: "client" as Role, icon: ShoppingBag, label: t.login.client },
-                        { value: "freelancer" as Role, icon: Briefcase, label: t.login.freelancer },
-                        { value: "both" as Role, icon: Users, label: t.login.both },
-                      ] as const
-                    ).map(({ value, icon: Icon, label }) => (
-                      <button
-                        key={value}
-                        type="button"
-                        onClick={() => setRole(value)}
-                        className={`w-full flex items-center gap-3 p-3 rounded-lg border text-sm transition-all ${
-                          role === value
-                            ? "border-primary bg-primary/10 text-foreground"
-                            : "border-white/10 bg-white/5 text-muted-foreground hover:border-white/20"
-                        }`}
-                      >
-                        <Icon className="w-4 h-4 shrink-0" />
-                        <span className="font-medium text-left flex-1">{label}</span>
-                        {role === value && <BadgeCheck className="w-4 h-4 text-primary" />}
-                      </button>
-                    ))}
-                  </div>
-                </div>
+                {!isLogin && (
+                  <>
+                    <div className="space-y-2">
+                      <Label>{t.login.chooseRole}</Label>
+                      <div className="space-y-2">
+                        {(
+                          [
+                            { value: "client" as Role, icon: ShoppingBag, label: t.login.client },
+                            { value: "freelancer" as Role, icon: Briefcase, label: t.login.freelancer },
+                            { value: "both" as Role, icon: Users, label: t.login.both },
+                          ] as const
+                        ).map(({ value, icon: Icon, label }) => (
+                          <button
+                            key={value}
+                            type="button"
+                            onClick={() => setRole(value)}
+                            className={`w-full flex items-center gap-3 p-3 rounded-lg border text-sm transition-all ${
+                              role === value
+                                ? "border-primary bg-primary/10 text-foreground"
+                                : "border-white/10 bg-white/5 text-muted-foreground hover:border-white/20"
+                            }`}
+                          >
+                            <Icon className="w-4 h-4 shrink-0" />
+                            <span className="font-medium text-left flex-1">{label}</span>
+                            {role === value && <BadgeCheck className="w-4 h-4 text-primary" />}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    <label className="flex items-start gap-3 cursor-pointer group mt-2">
+                      <input
+                        type="checkbox"
+                        checked={agreed}
+                        onChange={(e) => setAgreed(e.target.checked)}
+                        className="mt-0.5 w-4 h-4 shrink-0 rounded border border-white/30 bg-white/5 checked:bg-primary checked:border-primary accent-primary cursor-pointer"
+                      />
+                      <span className="text-xs text-muted-foreground leading-relaxed group-hover:text-foreground transition-colors">
+                        Нажимая кнопку, я принимаю условия{" "}
+                        <a href="/terms" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline" onClick={(e) => e.stopPropagation()}>
+                          Пользовательского соглашения
+                        </a>{" "}
+                        и даю согласие на обработку данных согласно{" "}
+                        <a href="/privacy" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline" onClick={(e) => e.stopPropagation()}>
+                          Политике конфиденциальности
+                        </a>.
+                      </span>
+                    </label>
+                  </>
+                )}
 
                 <Button
                   type="submit"
                   className="w-full mt-4 h-11"
-                  disabled={registerMutation.isPending || telegramLoading}
+                  disabled={registerMutation.isPending || telegramLoading || (!isLogin && !agreed)}
                 >
                   {registerMutation.isPending && <Loader2 className="w-4 h-4 animate-spin mr-2" />}
-                  {t.login.continue}
+                  {isLogin ? t.login.signIn : t.login.continue}
                 </Button>
               </form>
 
@@ -238,7 +308,7 @@ export default function Login() {
                 {isLogin ? `${t.login.noAccount} ` : `${t.login.haveAccount} `}
                 <button
                   type="button"
-                  onClick={() => setIsLogin(!isLogin)}
+                  onClick={handleModeSwitch}
                   className="text-primary hover:underline font-medium"
                 >
                   {isLogin ? t.login.signUp : t.login.signIn}

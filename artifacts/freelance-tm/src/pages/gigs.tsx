@@ -191,7 +191,7 @@ export default function Gigs() {
             {/* Sort bar */}
             <div className="flex items-center justify-between mb-5">
               <span className="text-sm text-muted-foreground">
-                {isLoading ? "..." : `${gigsData?.gigs.length || 0} результатов`}
+                {isLoading ? "..." : `${gigsData?.gigs?.length || 0} результатов`}
               </span>
               <Select value={sortBy} onValueChange={(v) => setSortBy(v as SortBy)}>
                 <SelectTrigger className="w-44 bg-background/50 border-white/10 h-8 text-sm">
@@ -213,7 +213,7 @@ export default function Gigs() {
                   <Skeleton key={i} className="h-[330px] w-full bg-white/5 rounded-xl" />
                 ))}
               </div>
-            ) : gigsData?.gigs.length === 0 ? (
+            ) : !(gigsData?.gigs?.length) ? (
               <div className="text-center py-20 bg-white/5 rounded-xl border border-white/10">
                 <Component className="w-12 h-12 text-muted-foreground mx-auto mb-4" />
                 <h3 className="text-xl font-display font-semibold mb-2">{t.gigs.noResults}</h3>
