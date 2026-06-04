@@ -1,1 +1,0 @@
-- [Expo Metro pnpm config](expo-metro-pnpm.md) — metro.config.js needs watchFolders+blockList for pnpm workspace; artifact.toml must not have ensurePreviewReachable=/status

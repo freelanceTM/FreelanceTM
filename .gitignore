@@ -47,3 +47,41 @@ Thumbs.db
 # Replit
 .cache/
 .local/
+
+  # Old/duplicate artifacts (cleanup)
+  artifacts/freelancetm/
+  artifacts/mockup-sandbox/
+
+  # Replit internal files
+  .agents/
+  .replit
+  .replitignore
+  EOF
+
+  # Remove from git tracking
+  git rm -r --cached artifacts/freelancetm/ 2>/dev/null || true
+  git rm -r --cached artifacts/mockup-sandbox/ 2>/dev/null || true
+  git rm -r --cached .agents/ 2>/dev/null || true
+  git rm --cached .replit 2>/dev/null || true
+  git rm --cached .replitignore 2>/dev/null || true
+
+  # Stage .gitignore
+  git add .gitignore
+
+  # Commit
+  git commit -m "chore: remove junk — old artifact duplicates and Replit internals" --allow-empty
+
+  # Push
+  git push https://x-access-token:@github.com/freelanceTM/FreelanceTM.git HEAD:main
+
+  echo "DONE"
+  
+
+# Old duplicate artifacts
+artifacts/freelancetm/
+artifacts/mockup-sandbox/
+
+# Replit internals
+.agents/
+.replit
+.replitignore
