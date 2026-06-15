@@ -71,6 +71,21 @@ export class OrdersController {
     return this.ordersService.create(userId, dto);
   }
 
+  @Post('from-gig/:gigId')
+  @ApiOperation({
+    summary: 'Create an order directly from a gig (SPEC #3 §3)',
+    description:
+      'Loads the gig, validates it is active, price > 0, and buyer ≠ seller, ' +
+      'then creates a pending order with the gig price snapshotted into ' +
+      'Order.totalPrice (price freeze). Delegates to the standard create() pipeline.',
+  })
+  async createFromGig(
+    @CurrentUser('sub') userId: number,
+    @Param('gigId', ParseIntPipe) gigId: number,
+  ) {
+    return this.ordersService.createFromGig(userId, gigId);
+  }
+
   @Get()
   @ApiOperation({ summary: 'List my orders' })
   @ApiQuery({ name: 'role', required: false, enum: ['buyer', 'seller'] })

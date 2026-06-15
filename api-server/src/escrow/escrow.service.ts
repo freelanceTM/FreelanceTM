@@ -8,6 +8,7 @@ import {
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { PrismaService } from '../prisma/prisma.service';
 import { TonContractService } from '../ton/ton-contract.service';
+import { OrderGuardService } from '../common/order-guard/order-guard.service';
 import { Prisma, TonEventType } from '@prisma/client';
 import {
   EVENTS,
@@ -23,6 +24,7 @@ export class EscrowService {
     private prisma: PrismaService,
     private eventEmitter: EventEmitter2,
     private tonContract: TonContractService,
+    private orderGuard: OrderGuardService,
   ) {}
 
   /**
@@ -40,110 +42,134 @@ export class EscrowService {
    * concurrent requests cannot both slip through the initial check.
    */
   async createEscrow(orderId: number, adminId?: number, callerId?: number) {
-    // ── 1. Load order with related wallets ───────────────────────────────────
-    const order = await this.prisma.order.findUnique({
-      where: { id: orderId },
-      include: {
-        buyer: { include: { wallet: true } },
-        seller: { include: { wallet: true } },
-        gig: true,
-      },
-    });
-
+    // ── 1. Load order + ownership / idempotency pre-flight ───────────────────
+    const order = await this.prisma.order.findUnique({ where: { id: orderId } });
     if (!order) throw new NotFoundException('Order not found');
 
-    // ── 2. Ownership check (HTTP callers only) ───────────────────────────────
     if (callerId !== undefined && order.buyerId !== callerId) {
       this.logger.warn(
         `createEscrow: caller ${callerId} is not the buyer of order ${orderId} (buyer=${order.buyerId})`,
       );
       throw new ForbiddenException('Only the buyer can create an escrow for this order');
     }
-
     if (order.escrowAddress) {
       throw new BadRequestException('Escrow already created for this order');
     }
 
-    // ── 3. Compute amount ────────────────────────────────────────────────────
-    // M-8 fix: bypass IEEE 754 float entirely — use Decimal string arithmetic
-    const amountNano = BigInt(new Prisma.Decimal(String(order.totalPrice)).mul('1000000000').floor().toFixed(0));
-
-    // ── 4. Best-effort on-chain escrow (outside DB tx — blockchain is not
-    //       transactional; we proceed even if it fails) ──────────────────────
-    let escrowAddress: string | null = null;
-    if (
-      this.tonContract.isConfigured() &&
-      order.buyer.wallet?.address &&
-      order.seller.wallet?.address
-    ) {
-      try {
-        const tx = await this.tonContract.createOrder(
-          order.id,
-          order.buyer.wallet.address,
-          order.seller.wallet.address,
-          amountNano,
-        );
-        escrowAddress = process.env.ESCROW_CONTRACT_ADDRESS || null;
-        this.logger.log(
-          `On-chain escrow created for order ${orderId}, seqno: ${tx?.seqno}`,
-        );
-      } catch (err) {
-        this.logger.warn(
-          `Failed to create on-chain escrow for order ${orderId}, falling back to simulation: ${err.message}`,
-        );
-      }
-    }
-
-    if (!escrowAddress) {
-      escrowAddress = `EQ_SIM_${orderId}_${Date.now()}`;
-    }
-
-    // ── 5. Atomic DB writes ──────────────────────────────────────────────────
-    //  Re-check escrowAddress inside the transaction to close the race window
-    //  between two concurrent createEscrow requests for the same order.
-    const updated = await this.prisma.$transaction(async (tx) => {
-      const fresh = await tx.order.findUnique({
-        where: { id: orderId },
-        select: { escrowAddress: true },
-      });
-
-      if (fresh?.escrowAddress) {
-        throw new BadRequestException('Escrow already created for this order');
-      }
-
-      const updatedOrder = await tx.order.update({
-        where: { id: orderId },
-        data: { escrowAddress, status: 'active' },
-        include: { buyer: true, seller: true, gig: true },
-      });
-
-      await tx.transaction.create({
-        data: {
-          userId: order.buyerId,
-          type: 'escrow_create',
-          status: 'completed',
-          amountNano,
-          currency: 'TON',
-          metadata: { orderId, escrowAddress },
-        },
-      });
-
-      await tx.tonEvent.create({
-        data: {
-          contractAddress: escrowAddress,
-          eventType: TonEventType.escrow_created,
-          payload: { orderId, amountNano: amountNano.toString() },
-        },
-      });
-
-      return updatedOrder;
-    });
-
-    this.logger.log(
-      `Escrow created — address: ${escrowAddress}, order: ${orderId}, buyer: ${order.buyerId}`,
+    // ── 2. Atomic DB writes (F-4 A2: shared with the order-creation tx path) ─
+    const updated = await this.prisma.$transaction((tx) =>
+      this.createEscrowWrites(tx, orderId),
     );
 
+    // ── 3. Best-effort on-chain settlement AFTER commit (non-transactional) ─
+    await this.settleEscrowOnChain(orderId);
+
+    this.logger.log(`Escrow created — order: ${orderId}, buyer: ${order.buyerId}`);
     return this.mapOrder(updated);
+  }
+
+  /**
+   * F-4 (Option A2) — DB-ONLY escrow creation, executed INSIDE a caller-provided
+   * transaction so order creation and escrow creation are ATOMIC:
+   *   ORDER EXISTS ⇔ ESCROW EXISTS.
+   *
+   * On-chain settlement is intentionally deferred to settleEscrowOnChain(),
+   * called by the caller AFTER the transaction commits (blockchain is not
+   * transactional). The escrowAddress starts as a simulated marker and is
+   * upgraded to the real contract address by settleEscrowOnChain() on success.
+   *
+   * Re-checks escrowAddress inside the tx to keep the concurrency guard.
+   */
+  async createEscrowWrites(tx: Prisma.TransactionClient, orderId: number) {
+    const order = await tx.order.findUnique({ where: { id: orderId } });
+    if (!order) throw new NotFoundException('Order not found');
+    if (order.escrowAddress) {
+      throw new BadRequestException('Escrow already created for this order');
+    }
+
+    const amountNano = BigInt(
+      new Prisma.Decimal(String(order.totalPrice)).mul('1000000000').floor().toFixed(0),
+    );
+    const escrowAddress = `EQ_SIM_${orderId}_${Date.now()}`;
+
+    const updatedOrder = await tx.order.update({
+      where: { id: orderId },
+      data: { escrowAddress, status: 'active' },
+      include: { buyer: true, seller: true, gig: true },
+    });
+
+    await tx.transaction.create({
+      data: {
+        userId: order.buyerId,
+        type: 'escrow_create',
+        status: 'completed',
+        amountNano,
+        currency: 'TON',
+        metadata: { orderId, escrowAddress },
+      },
+    });
+
+    await tx.tonEvent.create({
+      data: {
+        contractAddress: escrowAddress,
+        eventType: TonEventType.escrow_created,
+        payload: { orderId, amountNano: amountNano.toString() },
+      },
+    });
+
+    return updatedOrder;
+  }
+
+  /**
+   * F-4 (Option A2) — best-effort on-chain escrow settlement, run AFTER the DB
+   * transaction commits. Never throws (blockchain is non-transactional and
+   * secondary to the DB source of truth). If the on-chain order is created, the
+   * simulated escrowAddress is upgraded to the real contract address so that
+   * later release/refund perform their on-chain legs.
+   */
+  async settleEscrowOnChain(orderId: number): Promise<void> {
+    try {
+      const order = await this.prisma.order.findUnique({
+        where: { id: orderId },
+        include: {
+          buyer: { include: { wallet: true } },
+          seller: { include: { wallet: true } },
+        },
+      });
+      if (!order || !order.escrowAddress || !order.escrowAddress.startsWith('EQ_SIM')) {
+        return; // no escrow, or already settled on a real contract address
+      }
+      if (
+        !this.tonContract.isConfigured() ||
+        !order.buyer.wallet?.address ||
+        !order.seller.wallet?.address
+      ) {
+        return; // on-chain not available — escrow remains simulated (valid state)
+      }
+
+      const amountNano = BigInt(
+        new Prisma.Decimal(String(order.totalPrice)).mul('1000000000').floor().toFixed(0),
+      );
+      const tx = await this.tonContract.createOrder(
+        order.id,
+        order.buyer.wallet.address,
+        order.seller.wallet.address,
+        amountNano,
+      );
+      this.logger.log(`On-chain escrow created for order ${orderId}, seqno: ${tx?.seqno}`);
+
+      const realAddr = process.env.ESCROW_CONTRACT_ADDRESS;
+      if (realAddr) {
+        await this.prisma.order.update({
+          where: { id: orderId },
+          data: { escrowAddress: realAddr },
+        });
+      }
+    } catch (err: any) {
+      this.logger.warn(
+        `settleEscrowOnChain failed for order ${orderId} (escrow remains simulated): ${err.message}`,
+      );
+    }
   }
 
   /**
@@ -174,6 +200,18 @@ export class EscrowService {
    *   also fires outside so it is only triggered after a successful DB commit.
    */
   async releaseEscrow(orderId: number, userId: number) {
+    // SPEC #2 §4 STEP 4 — CRITICAL SECTION.
+    //  Defense-in-depth on top of the existing DB-level CAS:
+    //   • withLock serializes concurrent releases for this order in-process.
+    //   • assertNotProcessed blocks a replay if an 'escrow_release' ledger
+    //     entry for this order already exists (idempotency).
+    return this.orderGuard.withLock(orderId, async () => {
+      await this.orderGuard.assertNotProcessed(orderId, 'ESCROW_RELEASE');
+      return this.releaseEscrowInner(orderId, userId);
+    });
+  }
+
+  private async releaseEscrowInner(orderId: number, userId: number) {
     // ── 1. Load order for pre-flight validation (read-only, outside tx) ─────
     const order = await this.prisma.order.findUnique({
       where: { id: orderId },
@@ -219,6 +257,9 @@ export class EscrowService {
 
     // ── 2. Best-effort on-chain release (outside tx — blockchain is not
     //       transactional; DB state is the source of truth) ─────────────────
+    //  F-9: capture the on-chain outcome as a deterministic settlement verdict
+    //  recorded on the escrow_release ledger row (no schema change).
+    let settlement = this.initialSettlement(order.escrowAddress);
     if (
       this.tonContract.isConfigured() &&
       order.escrowAddress &&
@@ -227,10 +268,12 @@ export class EscrowService {
       try {
         await this.tonContract.resolveDispute(orderId, 1, 10000); // 1 = release to seller
         this.logger.log(`On-chain escrow released for order ${orderId}`);
+        settlement = { state: 'success', attempts: 1, updatedAt: new Date().toISOString() };
       } catch (err) {
         this.logger.warn(
           `On-chain release failed for order ${orderId} (DB release will still proceed): ${err.message}`,
         );
+        settlement = { state: 'failed', attempts: 1, updatedAt: new Date().toISOString() };
       }
     }
 
@@ -283,6 +326,7 @@ export class EscrowService {
             grossAmountNano: amountNano.toString(),
             feeNano: feeNano.toString(),
             feePercent,
+            settlement, // F-9: on-chain settlement verdict
           },
         },
       });
@@ -338,6 +382,11 @@ export class EscrowService {
       `net ${sellerNet} nano, buyer ${userId}`,
     );
 
+    // F-11 observability hook (read-only log; no logic change)
+    this.logger.log(
+      `[F11-OBSERV] escrow_release orderId=${orderId} settlement=${settlement.state}`,
+    );
+
     return this.mapOrder(updated);
   }
 
@@ -359,6 +408,18 @@ export class EscrowService {
    * Called by AdminService.resolveDispute() when resolution === 'seller_wins'.
    */
   async adminReleaseEscrow(orderId: number, adminId: number) {
+    // F-3 fix — single-entry execution rights:
+    //   • withLock serializes concurrent admin releases for this order (in-proc),
+    //   • assertNotProcessed blocks replay if an 'escrow_release' ledger entry
+    //     already exists for this order (cross-call idempotency),
+    //   • on-chain is moved to AFTER the atomic DB commit (see inner method).
+    return this.orderGuard.withLock(orderId, async () => {
+      await this.orderGuard.assertNotProcessed(orderId, 'ESCROW_RELEASE');
+      return this.adminReleaseEscrowInner(orderId, adminId);
+    });
+  }
+
+  private async adminReleaseEscrowInner(orderId: number, adminId: number) {
     const order = await this.prisma.order.findUnique({
       where: { id: orderId },
       include: {
@@ -389,17 +450,11 @@ export class EscrowService {
     const feeNano    = (amountNano * BigInt(feePercent)) / 100n;
     const sellerNet  = amountNano - feeNano;
 
-    // Best-effort on-chain release (outside tx — not transactional)
-    if (this.tonContract.isConfigured() && order.escrowAddress && !order.escrowAddress.startsWith('EQ_SIM')) {
-      try {
-        await this.tonContract.resolveDispute(orderId, 1, 10000);
-      } catch (err: any) {
-        this.logger.warn(`adminReleaseEscrow: on-chain release failed for order ${orderId}: ${err.message}`);
-      }
-    }
-
+    // ── DB FINALIZATION (atomic claim + credit) ──────────────────────────────
+    //  The order CAS is the order-level lock: only one tx can move
+    //  delivered/disputed → completed. wallet credit + ledger share the same
+    //  $transaction so a crash cannot leave an order completed-but-unpaid.
     const updated = await this.prisma.$transaction(async (tx) => {
-      // CAS: accept 'delivered' OR 'disputed' — covers both normal and dispute paths
       const cas = await tx.order.updateMany({
         where: { id: orderId, status: { in: ['delivered', 'disputed'] } },
         data: { status: 'completed', completedAt: new Date() },
@@ -428,7 +483,9 @@ export class EscrowService {
           status: 'completed',
           amountNano: sellerNet,
           currency: 'TON',
-          metadata: { orderId, byAdmin: adminId, grossAmountNano: amountNano.toString(), feeNano: feeNano.toString(), feePercent },
+          // F-9: on-chain runs AFTER commit here, so settlement starts as
+          // 'pending' (or 'not_required' for SIM) and is finalized below.
+          metadata: { orderId, byAdmin: adminId, grossAmountNano: amountNano.toString(), feeNano: feeNano.toString(), feePercent, settlement: this.initialSettlement(order.escrowAddress) },
         },
       });
 
@@ -460,6 +517,18 @@ export class EscrowService {
 
       return updatedOrder;
     });
+
+    // ── ON-CHAIN release — AFTER the DB commit, only reachable once per order
+    //    (dispute CAS + order CAS + withLock + assertNotProcessed). Best-effort.
+    if (this.tonContract.isConfigured() && order.escrowAddress && !order.escrowAddress.startsWith('EQ_SIM')) {
+      try {
+        await this.tonContract.resolveDispute(orderId, 1, 10000);
+        await this.markSettlement(orderId, 'escrow_release', 'success');
+      } catch (err: any) {
+        this.logger.warn(`adminReleaseEscrow: on-chain release failed for order ${orderId}: ${err.message}`);
+        await this.markSettlement(orderId, 'escrow_release', 'failed');
+      }
+    }
 
     this.eventEmitter.emit(EVENTS.ESCROW_RELEASED, {
       orderId,
@@ -500,6 +569,14 @@ export class EscrowService {
    * deducted on refund, because no service was delivered.
    */
   async refundEscrow(orderId: number, adminId: number) {
+    // SPEC #2 §4 STEP 5-adjacent — guarded refund (idempotent + locked).
+    return this.orderGuard.withLock(orderId, async () => {
+      await this.orderGuard.assertNotProcessed(orderId, 'REFUND');
+      return this.refundEscrowInner(orderId, adminId);
+    });
+  }
+
+  private async refundEscrowInner(orderId: number, adminId: number) {
     // ── 1. Load order + buyer wallet (read-only pre-flight) ──────────────────
     const order = await this.prisma.order.findUnique({
       where: { id: orderId },
@@ -518,6 +595,7 @@ export class EscrowService {
 
     // ── 2. Best-effort on-chain refund (outside tx — blockchain is not
     //       transactional; DB state is the source of truth) ─────────────────
+    let settlement = this.initialSettlement(order.escrowAddress);
     if (
       this.tonContract.isConfigured() &&
       order.escrowAddress &&
@@ -525,8 +603,10 @@ export class EscrowService {
     ) {
       try {
         await this.tonContract.resolveDispute(orderId, 0, 0); // resolution=0 → refund buyer
+        settlement = { state: 'success', attempts: 1, updatedAt: new Date().toISOString() };
       } catch (err) {
         this.logger.warn(`On-chain refund failed for order ${orderId}: ${err.message}`);
+        settlement = { state: 'failed', attempts: 1, updatedAt: new Date().toISOString() };
       }
     }
 
@@ -554,7 +634,7 @@ export class EscrowService {
           status: 'completed',
           amountNano,
           currency: 'TON',
-          metadata: { orderId, escrowAddress: order.escrowAddress, byAdmin: adminId },
+          metadata: { orderId, escrowAddress: order.escrowAddress, byAdmin: adminId, settlement },
         },
       });
 
@@ -591,6 +671,11 @@ export class EscrowService {
     this.logger.log(
       `[ESCROW] Refunded — order ${orderId}, buyer ${order.buyerId}, ` +
       `amount ${amountNano} nano, admin ${adminId}`,
+    );
+
+    // F-11 observability hook (read-only log; no logic change)
+    this.logger.log(
+      `[F11-OBSERV] escrow_refund orderId=${orderId} settlement=${settlement.state}`,
     );
 
     return this.mapOrder(updated);
@@ -679,6 +764,66 @@ export class EscrowService {
       where: { id: orderId },
       data: { status: 'disputed', updatedAt: new Date() },
     });
+  }
+
+  /**
+   * F-9 settlement layer (Option C, metadata-only — no schema change).
+   *
+   * Returns the initial settlement verdict for a payout ledger row:
+   *   • 'not_required' when there is no real on-chain leg (SIM escrow / no addr),
+   *   • 'pending'      when a real on-chain settlement is expected.
+   */
+  private initialSettlement(escrowAddress?: string | null): {
+    state: 'not_required' | 'pending' | 'success' | 'failed';
+    attempts: number;
+    updatedAt: string;
+  } {
+    const hasOnChain =
+      this.tonContract.isConfigured() &&
+      !!escrowAddress &&
+      !escrowAddress.startsWith('EQ_SIM');
+    return {
+      state: hasOnChain ? 'pending' : 'not_required',
+      attempts: 0,
+      updatedAt: new Date().toISOString(),
+    };
+  }
+
+  /**
+   * F-9 — finalize the settlement verdict on the latest payout ledger row of a
+   * given type for an order. Idempotent-friendly: only patches metadata, never
+   * touches balances or creates financial rows. Used post-commit when the
+   * on-chain leg runs after the DB transaction (e.g. adminReleaseEscrow).
+   */
+  private async markSettlement(
+    orderId: number,
+    type: 'escrow_release' | 'escrow_refund',
+    state: 'success' | 'failed',
+  ): Promise<void> {
+    try {
+      const row = await this.prisma.transaction.findFirst({
+        where: { type, metadata: { path: ['orderId'], equals: orderId } },
+        orderBy: { createdAt: 'desc' },
+      });
+      if (!row) return;
+      const meta = (row.metadata as Record<string, any>) || {};
+      const prev = (meta.settlement as Record<string, any>) || { attempts: 0 };
+      await this.prisma.transaction.update({
+        where: { id: row.id },
+        data: {
+          metadata: {
+            ...meta,
+            settlement: {
+              state,
+              attempts: (prev.attempts ?? 0) + 1,
+              updatedAt: new Date().toISOString(),
+            },
+          },
+        },
+      });
+    } catch (err: any) {
+      this.logger.warn(`markSettlement(${type},${orderId}) failed: ${err.message}`);
+    }
   }
 
   private mapOrder(order: any) {

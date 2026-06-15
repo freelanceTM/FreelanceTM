@@ -495,17 +495,36 @@ export class GigsService {
     return this.mapGig(updated);
   }
 
+  /**
+   * SPEC #3 §2.5 — Soft delete.
+   *
+   * Transitions the gig to 'paused' instead of removing the DB row, so order
+   * history and FKs are preserved. Paused gigs are excluded from all public
+   * listing queries (findAll / findAllRanked / findAllFullText all filter
+   * status = 'active'). Ownership is enforced — only the seller may delete.
+   *
+   * Note (schema frozen): GigStatus has no 'inactive' value; 'paused' is the
+   * existing hidden-from-catalog state and is reused here. No schema change.
+   */
   async remove(userId: number, id: number) {
     const gig = await this.prisma.gig.findUnique({ where: { id } });
     if (!gig) throw new NotFoundException('Gig not found');
     if (gig.sellerId !== userId) throw new ForbiddenException('You can only delete your own gigs');
 
-    await this.prisma.gig.delete({ where: { id } });
+    // Already soft-deleted / hidden — no-op (idempotent).
+    if (gig.status === 'paused') return;
+
+    await this.prisma.gig.update({
+      where: { id },
+      data: { status: 'paused' },
+    });
+
+    // If it was live in the catalog, drop the category counter (mirrors pause()).
     if (gig.status === 'active') {
       await this.prisma.category.update({
         where: { id: gig.categoryId },
         data: { gigCount: { decrement: 1 } },
-      });
+      }).catch(() => {});
     }
   }
 

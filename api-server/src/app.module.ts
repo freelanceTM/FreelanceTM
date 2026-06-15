@@ -16,6 +16,7 @@ import { WalletsModule } from './wallets/wallets.module';
 import { EscrowModule } from './escrow/escrow.module';
 import { AiModule } from './ai/ai.module';
 import { AdminModule } from './admin/admin.module';
+import { InternalModule } from './internal/internal.module';
 import { TelegramModule } from './telegram/telegram.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { PaymentsModule } from './payments/payments.module';
@@ -81,6 +82,7 @@ import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
     EscrowModule,
     AiModule,
     AdminModule,
+    InternalModule,
     TelegramModule,
     NotificationsModule,
     PaymentsModule,

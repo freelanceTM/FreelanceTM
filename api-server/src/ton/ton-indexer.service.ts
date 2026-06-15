@@ -96,6 +96,13 @@ export class TonIndexerService {
             where: { id: Number(payload.orderId) },
             data: { status: 'completed', completedAt: new Date() },
           });
+          // F-10.1: retry on-chain settlement of the seller payout (if not final)
+          await this.reconcileSettlement(
+            event,
+            Number(payload.orderId),
+            'escrow_release',
+            () => this.tonContract.resolveDispute(Number(payload.orderId), 1, 10000),
+          );
         }
         break;
       case TonEventType.escrow_disputed:
@@ -115,9 +122,104 @@ export class TonIndexerService {
             where: { id: Number(payload.orderId) },
             data: { status: 'cancelled' },
           });
+          // F-10.1: retry on-chain settlement of the buyer refund (if not final)
+          await this.reconcileSettlement(
+            event,
+            Number(payload.orderId),
+            'escrow_refund',
+            () => this.tonContract.resolveDispute(Number(payload.orderId), 0, 0),
+          );
         }
         break;
     }
+  }
+
+  /**
+   * F-10.1 — Settlement retry/reconciliation (Option C, metadata-only).
+   *
+   * Reuses the existing TonEvent queue + retry budget. For a payout ledger row
+   * (escrow_release / escrow_refund) whose settlement is not yet final, it
+   * re-attempts ONLY the on-chain leg and advances the settlement state machine:
+   *
+   *     pending → success | failed
+   *     failed  → success | manual   (manual at MAX_RETRIES)
+   *     success / manual / not_required → terminal (never re-transitioned)
+   *
+   * HARD GUARANTEES (idempotency):
+   *   • NEVER mutates Wallet.balanceNano
+   *   • NEVER creates a Transaction row
+   *   • NEVER touches order/withdrawal status (status reaffirm above is the
+   *     pre-existing idempotent behavior, not part of the settlement retry)
+   *   • Only resends the on-chain message + patches Transaction.metadata.settlement
+   *
+   * Double-payout safety: the DB credit happened exactly once at release/refund
+   * time; this layer only re-pushes the on-chain message (TON seqno dedupes
+   * duplicate sends). No second DB payout is possible.
+   */
+  private async reconcileSettlement(
+    event: any,
+    orderId: number,
+    txType: 'escrow_release' | 'escrow_refund',
+    resendOnChain: () => Promise<unknown>,
+  ): Promise<void> {
+    const row = await this.prisma.transaction.findFirst({
+      where: { type: txType as any, metadata: { path: ['orderId'], equals: orderId } },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (!row) return; // nothing to settle
+
+    const meta = (row.metadata as Record<string, any>) || {};
+    const settlement = (meta.settlement as Record<string, any>) || { state: 'not_required', attempts: 0 };
+
+    // Terminal states — forbidden transitions (success/manual/not_required → *)
+    if (['success', 'manual', 'not_required'].includes(settlement.state)) return;
+
+    // F-11 observability hook (read-only log; no logic change)
+    this.logger.log(
+      `[F11-OBSERV] retry ${txType} orderId=${orderId} txId=${row.id} ` +
+      `settlement=${settlement.state} tonEventRetry=${event.retryCount}`,
+    );
+
+    // state ∈ { pending, failed } → re-attempt the on-chain leg ONLY
+    try {
+      await resendOnChain();
+      await this.patchSettlement(row.id, meta, {
+        state: 'success',
+        attempts: (settlement.attempts ?? 0) + 1,
+      });
+      this.logger.log(`[SETTLEMENT] ${txType} order ${orderId} → success (retry)`);
+    } catch (err: any) {
+      const attempts = (settlement.attempts ?? 0) + 1;
+      // event.retryCount is the count BEFORE this failure increments it.
+      const willReachLimit = event.retryCount + 1 >= MAX_RETRIES;
+      if (willReachLimit) {
+        await this.patchSettlement(row.id, meta, { state: 'manual', attempts, lastError: err.message });
+        this.logger.error(
+          `[SETTLEMENT] ${txType} order ${orderId} reached retry limit (${MAX_RETRIES}) → ` +
+          `state=manual. Manual intervention required.`,
+        );
+        return; // do NOT throw → caller marks TonEvent processed=true
+      }
+      await this.patchSettlement(row.id, meta, { state: 'failed', attempts, lastError: err.message });
+      throw err; // increments TonEvent.retryCount → retried next tick
+    }
+  }
+
+  /** F-10.1 — patch ONLY Transaction.metadata.settlement (no money mutation). */
+  private async patchSettlement(
+    txId: number,
+    meta: Record<string, any>,
+    settlement: { state: string; attempts: number; lastError?: string },
+  ): Promise<void> {
+    await this.prisma.transaction.update({
+      where: { id: txId },
+      data: {
+        metadata: {
+          ...meta,
+          settlement: { ...settlement, updatedAt: new Date().toISOString() },
+        },
+      },
+    });
   }
 
   /**

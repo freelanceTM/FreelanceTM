@@ -29,33 +29,54 @@ export class WalletsController {
     };
   }
 
+  @Get('transactions')
+  @ApiOperation({ summary: 'Get my ledger transactions (single source of truth)' })
+  async getMyTransactions(@CurrentUser('sub') userId: number) {
+    const txs = await this.walletsService.listTransactions(userId);
+    return txs.map((t) => ({
+      id: t.id,
+      type: t.type,
+      status: t.status,
+      amountNano: t.amountNano.toString(),
+      currency: t.currency,
+      metadata: t.metadata,
+      txHash: t.txHash,
+      createdAt: t.createdAt,
+    }));
+  }
+
   /**
-   * Admin-only: manually sync a user's on-chain balance into the DB.
-   * Requires role=admin in the JWT payload.
-   * Every invocation is written to the logger for audit trail.
+   * Admin-only: apply an audited balance ADJUSTMENT (signed delta).
+   *
+   * F-2 fix: this no longer overwrites the balance to an absolute value
+   * (which bypassed the ledger and lost concurrent escrow/withdrawal writes).
+   * It now applies a signed delta atomically, writes a Transaction audit row,
+   * and refuses to overdraft. Body: { amountNano: string (signed), reason?: string }.
    */
   @Post(':userId/update-balance')
   @UseGuards(RolesGuard)
   @Roles('admin')
-  @ApiOperation({ summary: 'Admin/Sync: update user balance (internal, admin only)' })
+  @ApiOperation({ summary: 'Admin: audited balance adjustment by signed delta (admin only)' })
   async updateBalance(
     @CurrentUser('sub') adminId: number,
     @Param('userId', ParseIntPipe) userId: number,
-    @Body('balanceNano') balanceNano: string,
+    @Body('amountNano') amountNano: string,
+    @Body('reason') reason?: string,
   ) {
+    const delta = BigInt(amountNano);
     this.logger.warn(
-      `[AUDIT] Admin ${adminId} updating balance for user ${userId} → ${balanceNano} nano`,
+      `[AUDIT] Admin ${adminId} adjusting balance for user ${userId} by ${delta} nano (reason: ${reason ?? 'n/a'})`,
     );
 
-    const wallet = await this.walletsService.updateBalance(userId, BigInt(balanceNano));
+    const wallet = await this.walletsService.adjustBalance(userId, delta, adminId, reason);
 
     this.logger.log(
-      `[AUDIT] Balance updated — user ${userId} new balance: ${wallet.balanceNano.toString()} nano (by admin ${adminId})`,
+      `[AUDIT] Balance adjusted — user ${userId} new balance: ${wallet?.balanceNano.toString()} nano (by admin ${adminId})`,
     );
 
     return {
-      address: wallet.address,
-      balanceNano: wallet.balanceNano.toString(),
+      address: wallet?.address,
+      balanceNano: wallet?.balanceNano.toString(),
     };
   }
 }

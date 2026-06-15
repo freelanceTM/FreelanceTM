@@ -192,6 +192,8 @@ model User {
   disputesInitiated Dispute[]     @relation("DisputeInitiator")
   disputesResolved  Dispute[]     @relation("DisputeResolver")
   payments          Payment[]
+  paymentsReviewed  Payment[]     @relation("PaymentReviewer")
+  tendersAssigned   Tender[]      @relation("TenderAssignee")
   favorites         Favorite[]
   reviewsGiven      Review[]      @relation("ReviewAuthor")
   reviewsReceived   Review[]      @relation("ReviewTarget")
@@ -458,7 +460,7 @@ model Tender {
   category   Category    @relation(fields: [categoryId], references: [id])
   bids       TenderBid[]
   orders     Order[]     @relation("TenderOrders")
-  assignedTo User?       @relation(fields: [assignedToId], references: [id])
+  assignedTo User?       @relation("TenderAssignee", fields: [assignedToId], references: [id])
 
   @@map("tenders")
 }

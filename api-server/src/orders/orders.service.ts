@@ -10,6 +10,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { OrderStatus, Prisma } from '@prisma/client';
 import { EscrowService } from '../escrow/escrow.service';
 import { PromocodesService } from '../promocodes/promocodes.service';
+import { OrderGuardService } from '../common/order-guard/order-guard.service';
 import {
   EVENTS,
   OrderCreatedEvent,
@@ -24,6 +25,7 @@ export class OrdersService {
     private eventEmitter: EventEmitter2,
     private escrow: EscrowService,
     private promocodes: PromocodesService,
+    private orderGuard: OrderGuardService,
   ) {}
 
   /**
@@ -184,6 +186,11 @@ export class OrdersService {
         data: { orderCount: { increment: 1 } },
       });
 
+      // F-4 (A2): create escrow IN THE SAME transaction as the order.
+      //  If this throws, the whole order tx rolls back → no phantom order.
+      //  Invariant: ORDER EXISTS ⇔ ESCROW EXISTS.
+      await this.escrow.createEscrowWrites(tx, created.id);
+
       const order = await tx.order.findUnique({
         where: { id: created.id },
         include: {
@@ -200,8 +207,8 @@ export class OrdersService {
 
     const { order, grossPrice: gross, finalPrice: net, discountAmount: discount } = result;
 
-    // Escrow creation is non-fatal
-    try { await this.escrow.createEscrow(order.id); } catch {}
+    // On-chain escrow settlement — best-effort, AFTER the atomic DB commit.
+    await this.escrow.settleEscrowOnChain(order.id);
 
     this.eventEmitter.emit(EVENTS.ORDER_CREATED, {
       orderId: order.id,
@@ -216,6 +223,41 @@ export class OrdersService {
       grossPrice: gross.toString(),
       discountAmount: discount.toString(),
     };
+  }
+
+  /**
+   * SPEC #3 §3 — Gig → Order bridge (POST /orders/from-gig/:gigId).
+   *
+   * Thin entry point that reuses the existing create() pipeline so there is
+   * NO duplicated order/escrow logic. create() already enforces:
+   *   • gig.status === 'active'        (SPEC §5)
+   *   • gig.sellerId !== buyer         (SPEC §5: seller ≠ buyer)
+   *   • price snapshot into Order.totalPrice  (SPEC RULE 1/3: price freeze —
+   *     the order stores its own totalPrice and never reads live gig.price)
+   *
+   * This method adds the SPEC §5 `price > 0` guard up front (create() does not
+   * assert it explicitly), then delegates.
+   *
+   * Conflict note (reported, not silently resolved): SPEC §3 sets the new order
+   * status to PENDING_PAYMENT. That value does not exist in the real OrderStatus
+   * enum and the schema must not change, so the order is created with the
+   * existing default 'pending' (the equivalent pre-payment state).
+   */
+  async createFromGig(userId: number, gigId: number) {
+    const gig = await this.prisma.gig.findUnique({
+      where: { id: gigId },
+      select: { id: true, price: true, status: true, sellerId: true },
+    });
+    if (!gig) throw new NotFoundException('Gig not found');
+
+    // SPEC §5: price must be > 0
+    if (new Prisma.Decimal(String(gig.price)).lte(0)) {
+      throw new BadRequestException('Gig price must be greater than zero');
+    }
+
+    // Delegate — create() performs active-check, self-order-check, price
+    // snapshot, ledger/extras, and non-fatal escrow creation.
+    return this.create(userId, { gigId });
   }
 
   /**
@@ -234,32 +276,43 @@ export class OrdersService {
       throw new BadRequestException('Buyer and seller cannot be the same user');
     }
 
-    const order = await this.prisma.order.create({
-      data: {
-        gigId: null,
-        tenderId: params.tenderId,
-        buyerId: params.buyerId,
-        sellerId: params.sellerId,
-        totalPrice: params.totalPrice,
-        requirements: params.requirements
-          ? `[Tender: ${params.title}]\n${params.requirements}`
-          : `[Tender: ${params.title}]`,
-        deliveryDays: params.deliveryDays,
-        revisionsAllowed: 1,
-        revisionsUsed: 0,
-        status: 'pending',
-      },
-      include: { buyer: true, seller: true },
+    // F-4 (A2): order + escrow are created atomically in one transaction.
+    const order = await this.prisma.$transaction(async (tx) => {
+      const created = await tx.order.create({
+        data: {
+          gigId: null,
+          tenderId: params.tenderId,
+          buyerId: params.buyerId,
+          sellerId: params.sellerId,
+          totalPrice: params.totalPrice,
+          requirements: params.requirements
+            ? `[Tender: ${params.title}]\n${params.requirements}`
+            : `[Tender: ${params.title}]`,
+          deliveryDays: params.deliveryDays,
+          revisionsAllowed: 1,
+          revisionsUsed: 0,
+          status: 'pending',
+        },
+      });
+
+      // Escrow in the SAME tx → no phantom order if it fails.
+      await this.escrow.createEscrowWrites(tx, created.id);
+
+      return tx.order.findUnique({
+        where: { id: created.id },
+        include: { buyer: true, seller: true },
+      });
     });
 
-    try { await this.escrow.createEscrow(order.id); } catch {}
+    // On-chain settlement — best-effort, after commit.
+    await this.escrow.settleEscrowOnChain(order!.id);
 
     this.eventEmitter.emit(EVENTS.ORDER_CREATED, {
-      orderId: order.id,
-      buyerId: order.buyerId,
-      sellerId: order.sellerId,
+      orderId: order!.id,
+      buyerId: order!.buyerId,
+      sellerId: order!.sellerId,
       gigTitle: params.title,
-      totalPrice: order.totalPrice.toString(),
+      totalPrice: order!.totalPrice.toString(),
     } as OrderCreatedEvent);
 
     return this.mapOrder(order);
@@ -334,6 +387,13 @@ export class OrdersService {
         `Cannot transition from '${order.status}' to '${newStatus}'`,
       );
     }
+
+    // SPEC #2 §1 — state-machine guard (defense-in-depth on top of the
+    // role-based check above). Fixes illegal status jumps regardless of role.
+    this.orderGuard.assertCanTransition(
+      order.status,
+      newStatus as OrderStatus,
+    );
 
     // S2-2: Revision limit guard
     if (newStatus === 'revision_requested') {

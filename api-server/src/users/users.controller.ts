@@ -99,6 +99,28 @@ export class UsersController {
     return this.usersService.getUserById(userId, requesterId);
   }
 
+  @Get(':userId/reviews')
+  @ApiOperation({ summary: 'List approved reviews received by a user (public)' })
+  @ApiQuery({ name: 'page', required: false, type: Number })
+  @ApiQuery({ name: 'limit', required: false, type: Number })
+  async getUserReviews(
+    @Param('userId', ParseIntPipe) userId: number,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.usersService.getUserReviews(
+      userId,
+      page ? parseInt(page, 10) : 1,
+      limit ? parseInt(limit, 10) : 20,
+    );
+  }
+
+  @Get(':userId/trust')
+  @ApiOperation({ summary: 'Get a user trust score (avg rating, total, breakdown)' })
+  async getUserTrust(@Param('userId', ParseIntPipe) userId: number) {
+    return this.usersService.getTrust(userId);
+  }
+
   @Get()
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles('admin')

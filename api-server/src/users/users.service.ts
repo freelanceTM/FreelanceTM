@@ -161,6 +161,89 @@ export class UsersService {
     });
   }
 
+  /**
+   * Reviews & Trust SPEC §4 — GET /users/:id/reviews.
+   *
+   * Returns approved reviews targeting this user (newest first), paginated.
+   * Only 'approved' reviews are exposed — consistent with the existing
+   * moderation model (recalculateRatings also counts only approved reviews).
+   */
+  async getUserReviews(userId: number, page = 1, limit = 20) {
+    const p = Math.max(1, page);
+    const l = Math.min(100, Math.max(1, limit));
+
+    const exists = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { id: true },
+    });
+    if (!exists) throw new NotFoundException('User not found');
+
+    const [reviews, total] = await Promise.all([
+      this.prisma.review.findMany({
+        where: { targetId: userId, status: 'approved' },
+        orderBy: { createdAt: 'desc' },
+        skip: (p - 1) * l,
+        take: l,
+        include: {
+          author: { select: { id: true, username: true, displayName: true, avatarUrl: true } },
+          gig: { select: { id: true, title: true } },
+        },
+      }),
+      this.prisma.review.count({ where: { targetId: userId, status: 'approved' } }),
+    ]);
+
+    return {
+      data: reviews.map((r) => ({ ...r, createdAt: r.createdAt.toISOString() })),
+      meta: { total, page: p, limit: l },
+    };
+  }
+
+  /**
+   * Reviews & Trust SPEC §3 — GET /users/:id/trust.
+   *
+   * trustScore = average rating across this user's approved received reviews.
+   * Also returns totalReviews and a 1–5 star ratingBreakdown.
+   * Computed via DB aggregate / groupBy — no float drift in app code.
+   */
+  async getTrust(userId: number) {
+    const exists = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { id: true },
+    });
+    if (!exists) throw new NotFoundException('User not found');
+
+    const where = { targetId: userId, status: 'approved' as const };
+
+    const [agg, grouped] = await Promise.all([
+      this.prisma.review.aggregate({
+        where,
+        _avg: { rating: true },
+        _count: { id: true },
+      }),
+      this.prisma.review.groupBy({
+        by: ['rating'],
+        where,
+        _count: { rating: true },
+      }),
+    ]);
+
+    const breakdown: Record<1 | 2 | 3 | 4 | 5, number> = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
+    for (const g of grouped) {
+      if (g.rating >= 1 && g.rating <= 5) {
+        breakdown[g.rating as 1 | 2 | 3 | 4 | 5] = g._count.rating;
+      }
+    }
+
+    const avg = agg._avg.rating ?? 0;
+    return {
+      userId,
+      trustScore: Math.round(avg * 100) / 100, // average rating, 2 decimals
+      averageRating: Math.round(avg * 100) / 100,
+      totalReviews: agg._count.id,
+      ratingBreakdown: breakdown,
+    };
+  }
+
   private mapUser(user: any) {
     const { wallet, ...rest } = user;
     return {

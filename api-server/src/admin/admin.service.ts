@@ -13,6 +13,7 @@ import {
   WithdrawalRejectedEvent,
 } from '../events/notification.events';
 import { EscrowService } from '../escrow/escrow.service';
+import { WithdrawalsService } from '../withdrawals/withdrawals.service';
 
 @Injectable()
 export class AdminService {
@@ -22,6 +23,7 @@ export class AdminService {
     private prisma: PrismaService,
     private eventEmitter: EventEmitter2,
     private escrowService: EscrowService,
+    private withdrawalsService: WithdrawalsService,
   ) {}
 
   // GIG MODERATION
@@ -252,12 +254,13 @@ export class AdminService {
       include: { order: true },
     });
     if (!dispute) throw new NotFoundException('Dispute not found');
-    if (dispute.status !== 'open' && dispute.status !== 'resolving') {
-      throw new BadRequestException('Dispute already resolved');
-    }
 
-    const updated = await this.prisma.dispute.update({
-      where: { id: disputeId },
+    // F-3 STEP 1 — DISPUTE CAS CLAIM (cross-process single-entry + replay block).
+    //  "First successful write wins execution rights": only one caller can move
+    //  the dispute open/resolving → resolved. A concurrent or replayed call gets
+    //  count=0 and STOPS before any escrow / on-chain side effect.
+    const claim = await this.prisma.dispute.updateMany({
+      where: { id: disputeId, status: { in: ['open', 'resolving'] } },
       data: {
         status: 'resolved',
         resolution,
@@ -266,6 +269,11 @@ export class AdminService {
         evidence: { ...(dispute.evidence as object || {}), adminReason: reason },
       },
     });
+    if (claim.count === 0) {
+      throw new BadRequestException('Dispute already resolved (or being resolved by another request)');
+    }
+
+    const updated = await this.prisma.dispute.findUnique({ where: { id: disputeId } });
 
     // ── S6-1: Dispute Resolution Escrow Integration ──────────────────────────
     //
@@ -295,47 +303,24 @@ export class AdminService {
     // Order status is now owned by the escrow CAS — we no longer do a
     // separate order.update here to avoid double-write conflicts.
 
+    //  F-3 FORBIDDEN #4 — NO silent fallback completion without payment.
+    //  If escrow movement fails, we let the error propagate. The order's money
+    //  state is owned by the escrow CAS; we never flip order.status to
+    //  completed/cancelled without the corresponding fund movement.
     if (resolution === 'buyer_wins') {
-      try {
-        await this.escrowService.refundEscrow(dispute.orderId, adminUserId);
-      } catch (err: any) {
-        // Log and continue — the Dispute is still marked resolved so the
-        // admin can see it, and the error is surfaced for manual follow-up.
-        this.logger.error(
-          `[DISPUTE ${disputeId}] buyer_wins escrow refund failed: ${err.message}`,
-          err.stack,
-        );
-        // Fall back: at least cancel the order so it's not stuck in 'disputed'
-        await this.prisma.order.update({
-          where: { id: dispute.orderId },
-          data: { status: 'cancelled' },
-        }).catch(() => {});
-      }
+      // refundEscrow: atomic CAS + $transaction; credits buyer, sets cancelled.
+      await this.escrowService.refundEscrow(dispute.orderId, adminUserId);
     } else if (resolution === 'seller_wins') {
-      try {
-        // Use adminReleaseEscrow — NOT the regular releaseEscrow.
-        // releaseEscrow() pre-flight rejects any order not in 'delivered' state
-        // and its CAS also checks WHERE status = 'delivered'. Disputed orders
-        // are in 'disputed' state, so releaseEscrow always throws for them.
-        // adminReleaseEscrow() accepts both 'delivered' and 'disputed' states.
-        await this.escrowService.adminReleaseEscrow(dispute.orderId, adminUserId);
-      } catch (err: any) {
-        this.logger.error(
-          `[DISPUTE ${disputeId}] seller_wins escrow release failed: ${err.message}`,
-          err.stack,
-        );
-        // Fall back: mark order completed so it's not stuck in 'disputed'
-        await this.prisma.order.update({
-          where: { id: dispute.orderId },
-          data: { status: 'completed' },
-        }).catch(() => {});
-      }
+      // adminReleaseEscrow: accepts delivered|disputed; F-3-hardened (lock +
+      // idempotency + on-chain after commit). Releases net to seller, completes.
+      await this.escrowService.adminReleaseEscrow(dispute.orderId, adminUserId);
     } else {
-      // split or other: no automatic escrow movement, admin resolves manually
-      await this.prisma.order.update({
-        where: { id: dispute.orderId },
-        data: { status: 'cancelled' },
-      });
+      // split / none: no automatic fund movement implemented. We do NOT touch
+      // order.status (would strand funds). Admin must resolve funds manually.
+      this.logger.warn(
+        `[DISPUTE ${disputeId}] resolution='${resolution}' has no automatic escrow movement — ` +
+        `order ${dispute.orderId} left for manual fund handling.`,
+      );
     }
 
     this.eventEmitter.emit(EVENTS.DISPUTE_RESOLVED, {
@@ -497,95 +482,47 @@ export class AdminService {
     };
   }
 
+  /**
+   * F-1 fix — admin approve now DELEGATES to the canonical WithdrawalsService
+   * (Path A). The balance was already reserved at request time; this path
+   * therefore must NOT touch the wallet again (the old code double-debited).
+   *
+   * WithdrawalsService.approve() performs the CAS status transition + on-chain
+   * payout + ledger finalization. We only re-emit the admin notification event
+   * afterward to preserve existing notification behavior.
+   */
   async approveWithdrawal(withdrawalId: number, adminId: number) {
-    const withdrawal = await this.prisma.withdrawalRequest.findUnique({
-      where: { id: withdrawalId },
-      include: { user: { include: { wallet: true } } },
-    });
-    if (!withdrawal) throw new NotFoundException('Withdrawal request not found');
-    if (withdrawal.status !== 'pending') throw new BadRequestException('Withdrawal already processed');
+    const updated = await this.withdrawalsService.approve(adminId, withdrawalId);
 
-    if (!withdrawal.user.wallet) {
-      throw new BadRequestException('User does not have a wallet');
+    const w = await this.prisma.withdrawalRequest.findUnique({ where: { id: withdrawalId } });
+    if (w) {
+      this.eventEmitter.emit(EVENTS.WITHDRAWAL_APPROVED, {
+        withdrawalId,
+        userId: w.userId,
+        amountNano: w.amountNano.toString(),
+      } as WithdrawalApprovedEvent);
     }
-
-    const currentBalance = withdrawal.user.wallet.balanceNano;
-    if (currentBalance < withdrawal.amountNano) {
-      throw new BadRequestException('Insufficient wallet balance for this withdrawal');
-    }
-
-    const reviewedAt = new Date();
-
-    const updated = await this.prisma.$transaction(async (tx) => {
-      // CAS: only process if still pending
-      const cas = await tx.withdrawalRequest.updateMany({
-        where: { id: withdrawalId, status: 'pending' },
-        data: { status: 'completed', reviewedById: adminId, reviewedAt },
-      });
-      if (cas.count === 0) throw new BadRequestException('Withdrawal already processed');
-
-      // Deduct the amount from the user's wallet
-      await tx.wallet.update({
-        where: { userId: withdrawal.userId },
-        data: { balanceNano: { decrement: withdrawal.amountNano } },
-      });
-
-      // Record the ledger entry
-      await tx.transaction.create({
-        data: {
-          userId: withdrawal.userId,
-          type: 'withdraw',
-          status: 'completed',
-          amountNano: withdrawal.amountNano,
-          currency: withdrawal.currency,
-          metadata: { withdrawalId, adminId, destination: withdrawal.destination },
-        },
-      });
-
-      return tx.withdrawalRequest.findUnique({ where: { id: withdrawalId } });
-    });
-
-    this.eventEmitter.emit(EVENTS.WITHDRAWAL_APPROVED, {
-      withdrawalId,
-      userId: withdrawal.userId,
-      amountNano: withdrawal.amountNano.toString(),
-    } as WithdrawalApprovedEvent);
 
     return updated;
   }
 
+  /**
+   * F-1 fix — admin reject DELEGATES to WithdrawalsService.reject(), which
+   * refunds the reserved balance exactly once (CAS-guarded). No second balance
+   * mutation here.
+   */
   async rejectWithdrawal(withdrawalId: number, adminId: number, note?: string) {
-    const withdrawal = await this.prisma.withdrawalRequest.findUnique({
-      where: { id: withdrawalId },
-      include: { user: { include: { wallet: true } } },
-    });
-    if (!withdrawal) throw new NotFoundException('Withdrawal request not found');
-    if (withdrawal.status !== 'pending') throw new BadRequestException('Withdrawal already processed');
+    const updated = await this.withdrawalsService.reject(adminId, withdrawalId, note);
 
-    const reviewedAt = new Date();
-
-    const updated = await this.prisma.$transaction(async (tx) => {
-      const cas = await tx.withdrawalRequest.updateMany({
-        where: { id: withdrawalId, status: 'pending' },
-        data: { status: 'rejected', reviewedById: adminId, reviewedAt, note: note ?? null },
-      });
-      if (cas.count === 0) throw new BadRequestException('Withdrawal already processed');
-
-      // Return funds from hold back to the user's wallet
-      await tx.wallet.update({
-        where: { userId: withdrawal.userId },
-        data: { balanceNano: { increment: withdrawal.amountNano } },
-      });
-
-      return tx.withdrawalRequest.findUnique({ where: { id: withdrawalId } });
-    });
-
-    this.eventEmitter.emit(EVENTS.WITHDRAWAL_REJECTED, {
-      withdrawalId,
-      userId: withdrawal.userId,
-      amountNano: withdrawal.amountNano.toString(),
-      note,
-    } as WithdrawalRejectedEvent);
+    const w = await this.prisma.withdrawalRequest.findUnique({ where: { id: withdrawalId } });
+    if (w) {
+      this.eventEmitter.emit(EVENTS.WITHDRAWAL_REJECTED, {
+        withdrawalId,
+        userId: w.userId,
+        amountNano: w.amountNano.toString(),
+        note,
+      } as WithdrawalRejectedEvent);
+    }
 
     return updated;
   }

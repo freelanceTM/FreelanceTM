@@ -133,6 +133,11 @@ export class WithdrawalsService {
       `dest ${destination}, requestId ${req.id}`,
     );
 
+    // F-11 observability hook (read-only log; no logic change)
+    this.logger.log(
+      `[F11-OBSERV] withdraw withdrawalId=${req.id} status=${req.status}`,
+    );
+
     return req;
   }
 
@@ -157,13 +162,40 @@ export class WithdrawalsService {
    *     should handle idempotency at the blockchain level via the seqno).
    */
   async approve(adminId: number, withdrawalId: number, txHash?: string) {
-    // ── 1. Pre-flight — existence check (read-only, outside tx) ─────────────
-    const req = await this.prisma.withdrawalRequest.findUnique({ where: { id: withdrawalId } });
-    if (!req) throw new NotFoundException('Request not found');
-    if (req.status !== 'pending') throw new BadRequestException('Already processed');
+    // ── 1. CAS CLAIM — atomically move pending → processing BEFORE any
+    //       on-chain transfer. This is the double-spend gate.
+    //
+    //  The previous implementation fired the on-chain transfer first, gated
+    //  only by a read-only pre-flight check. Two concurrent admin approvals
+    //  both passed that check and BOTH executed ton.sendTransaction(), sending
+    //  the funds twice on-chain before the later DB CAS rejected the loser.
+    //
+    //  By claiming the row here (updateMany WHERE status='pending') under a
+    //  row-level lock, only ONE concurrent call can win and proceed to the
+    //  transfer; the loser gets count=0 and is rejected before any funds move.
+    const claim = await this.prisma.withdrawalRequest.updateMany({
+      where: { id: withdrawalId, status: 'pending' },
+      data: { status: 'processing', reviewedById: adminId, reviewedAt: new Date() },
+    });
 
-    // ── 2. Best-effort on-chain transfer (outside tx — blockchain is not
-    //       transactional; DB state is the authoritative source of truth) ────
+    if (claim.count === 0) {
+      const existing = await this.prisma.withdrawalRequest.findUnique({ where: { id: withdrawalId } });
+      if (!existing) throw new NotFoundException('Request not found');
+      this.logger.warn(
+        `[CAS] approve: withdrawalRequest ${withdrawalId} was in status '${existing.status}' ` +
+        `when admin ${adminId} attempted approval — possible concurrent approval.`,
+      );
+      throw new BadRequestException(
+        `Cannot approve — withdrawal is already in '${existing.status}' state.`,
+      );
+    }
+
+    // We won the claim — load the row for destination/amount.
+    const req = await this.prisma.withdrawalRequest.findUniqueOrThrow({ where: { id: withdrawalId } });
+
+    // ── 2. On-chain transfer (outside tx — blockchain is not transactional).
+    //       Only the single claim winner reaches this point, so the transfer
+    //       fires at most once per withdrawal.
     if (this.ton.isConfigured() && req.destinationType === 'ton_wallet') {
       try {
         const onChainTx = await this.ton.sendTransaction(
@@ -173,30 +205,30 @@ export class WithdrawalsService {
         );
         txHash = txHash || onChainTx.seqno?.toString();
       } catch (err: any) {
-        // On-chain failed — leave status 'pending' so admin can retry
+        // Transfer failed — release the claim back to 'pending' so an admin
+        // can retry. No funds moved; balance was already deducted at request
+        // time and stays deducted (the request is still outstanding).
+        await this.prisma.withdrawalRequest.updateMany({
+          where: { id: withdrawalId, status: 'processing' },
+          data: { status: 'pending', reviewedById: null, reviewedAt: null },
+        });
         throw new BadRequestException(`Blockchain transfer failed: ${err.message}`);
       }
     }
 
-    // ── 3. ACID transaction — status flip + ledger update are all-or-nothing ─
+    // ── 3. ACID transaction — processing → completed + ledger update ─────────
     return this.prisma.$transaction(async (tx) => {
-      // ── 3a. CAS: atomically claim the pending → completed transition ───────
-      //
-      //  Only one concurrent approval can match status='pending'. The second
-      //  concurrent call will find count=0 after the first commits.
       const cas = await tx.withdrawalRequest.updateMany({
-        where: { id: withdrawalId, status: 'pending' },
-        data: { status: 'completed', reviewedById: adminId, txHash, reviewedAt: new Date() },
+        where: { id: withdrawalId, status: 'processing' },
+        data: { status: 'completed', txHash },
       });
 
       if (cas.count === 0) {
         this.logger.warn(
-          `[CAS] approve: withdrawalRequest ${withdrawalId} was no longer 'pending' ` +
-          `when admin ${adminId} attempted approval — possible concurrent approval.`,
+          `[CAS] approve: withdrawalRequest ${withdrawalId} was no longer 'processing' ` +
+          `at finalization for admin ${adminId}.`,
         );
-        throw new BadRequestException(
-          'Withdrawal already processed — it may have been approved by a concurrent request.',
-        );
+        throw new BadRequestException('Withdrawal finalization failed — state changed unexpectedly.');
       }
 
       // ── 3b. Mark the corresponding ledger entry as completed ──────────────

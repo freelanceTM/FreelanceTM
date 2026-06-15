@@ -4,9 +4,10 @@ import { OrdersController } from './orders.controller';
 import { EscrowModule } from '../escrow/escrow.module';
 import { ReviewsModule } from '../reviews/reviews.module';
 import { PromocodesModule } from '../promocodes/promocodes.module';
+import { OrderGuardModule } from '../common/order-guard/order-guard.module';
 
 @Module({
-  imports: [EscrowModule, ReviewsModule, PromocodesModule],
+  imports: [EscrowModule, ReviewsModule, PromocodesModule, OrderGuardModule],
   providers: [OrdersService],
   controllers: [OrdersController],
   exports: [OrdersService],
